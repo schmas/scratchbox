@@ -70,6 +70,18 @@ pub fn slugged_name(original: &NoteId, slug: &str) -> String {
     }
 }
 
+/// Disambiguate a name that is already taken: `note.md` becomes `note-2.md`.
+///
+/// Used for two notes created in the same minute, for a rename onto an existing name, and
+/// for two same-named notes deleted into one trash directory.
+pub fn with_suffix(name: &str, n: usize) -> String {
+    let (stem, ext) = split_extension(name);
+    match ext {
+        Some(ext) => format!("{stem}-{n}.{ext}"),
+        None => format!("{stem}-{n}"),
+    }
+}
+
 /// Split a note name into stem and extension. Note names never start with `.`, so there is
 /// no dotfile ambiguity here.
 pub(crate) fn split_extension(name: &str) -> (&str, Option<&str>) {

@@ -5,6 +5,7 @@
 
 pub mod config;
 mod error;
+pub mod foldersync;
 pub mod naming;
 pub mod note;
 pub mod store;
@@ -15,5 +16,6 @@ pub use jiff;
 
 pub use config::{APP_SUBDIR, Config, Dirs};
 pub use error::{Error, Result};
+pub use foldersync::FolderSync;
 pub use note::{Format, InvalidNoteId, NoteId, NoteMeta};
 pub use store::{Store, StoreEvent, WorkspaceHealth};

@@ -30,4 +30,37 @@ pub enum Error {
 
     #[error(transparent)]
     InvalidNoteId(#[from] crate::note::InvalidNoteId),
+
+    #[error("could not {action} {path}")]
+    Io {
+        action: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A name that resolves outside the workspace — a symlink pointing elsewhere, most
+    /// likely. Refused rather than followed.
+    #[error("note {name} resolves to {resolved}, which is outside the workspace")]
+    EscapesWorkspace { name: String, resolved: PathBuf },
+
+    #[error("note {path} is not valid UTF-8")]
+    NotUtf8 { path: PathBuf },
+
+    #[error("could not find a free name for {name} after {tried} attempts")]
+    NoFreeName { name: String, tried: usize },
+}
+
+impl Error {
+    pub(crate) fn io(
+        action: &'static str,
+        path: impl Into<PathBuf>,
+    ) -> impl FnOnce(std::io::Error) -> Self {
+        let path = path.into();
+        move |source| Self::Io {
+            action,
+            path,
+            source,
+        }
+    }
 }
