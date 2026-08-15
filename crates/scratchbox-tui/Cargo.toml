@@ -14,6 +14,7 @@ crossbeam-channel.workspace = true
 crossterm.workspace = true
 edtui.workspace = true
 ratatui.workspace = true
+two-face.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

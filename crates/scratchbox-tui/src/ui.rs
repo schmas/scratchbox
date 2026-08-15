@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use scratchbox_core::{Format, WorkspaceHealth};
 
 use crate::app::{App, Conflict, Focus};
+use crate::syntax;
 
 /// Wide enough for a timestamped name plus its format tag, narrow enough to leave the
 /// editor the room that matters.
@@ -61,6 +62,14 @@ fn render_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|id| id.as_str().to_owned())
         .unwrap_or_else(|| "no note".to_owned());
 
+    // From the note in the buffer rather than the selection, so the two cannot disagree —
+    // and derived per frame rather than stored, which is what makes the D10 rename a no-op
+    // here: it leaves the extension alone, so the syntax comes out the same.
+    let format = app
+        .editor()
+        .loaded()
+        .map_or(Format::PlainText, |id| Format::from_name(id.as_str()));
+
     let block = pane_block(&title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -72,7 +81,9 @@ fn render_editor(frame: &mut Frame, app: &mut App, area: Rect) {
         .hide_status_line()
         .block(Block::default());
     frame.render_widget(
-        EditorView::new(app.editor_mut().state_mut()).theme(theme),
+        EditorView::new(app.editor_mut().state_mut())
+            .theme(theme)
+            .syntax_highlighter(Some(syntax::highlighter(format))),
         inner,
     );
 }
