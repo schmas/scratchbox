@@ -157,6 +157,18 @@ impl Config {
         self.workspace.join(APP_SUBDIR)
     }
 
+    /// Do the trash and the workspace sit inside one another, either way round?
+    ///
+    /// Both directions are dangerous and neither is a normal setup. A trash inside the
+    /// workspace syncs deleted notes, which is what moving the trash out was for. A
+    /// workspace inside the trash is worse: emptying the trash would take every live note
+    /// with it. Callers that delete consult this and refuse rather than proceed.
+    ///
+    /// Component-wise, so a trash at `<workspace>-old` is correctly seen as separate.
+    pub fn trash_overlaps_workspace(&self) -> bool {
+        self.trash.starts_with(&self.workspace) || self.workspace.starts_with(&self.trash)
+    }
+
     /// Create the workspace, its app dir, and the trash dir if they are missing.
     pub fn ensure_dirs(&self) -> Result<()> {
         for dir in [self.workspace.clone(), self.app_dir(), self.trash.clone()] {
