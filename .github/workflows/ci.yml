@@ -40,3 +40,29 @@ jobs:
       # undoable. It exits non-zero if any of that regresses.
       - name: edtui spike
         run: cargo run -p scratchbox-tui --example spike_editor
+
+  # Filesystem watching is the part of this design most likely to be subtly wrong, and
+  # wrong here means lost keystrokes. inotify and FSEvents report the same change
+  # differently, so both runners repeat the suite: an intermittent pass is a race, not a
+  # flake, and a single green run would hide it.
+  watcher-stability:
+    name: watcher x20 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build test binary once
+        run: cargo build --tests -p scratchbox-core
+
+      - name: Run the watcher suite 20 times
+        run: |
+          for run in $(seq 1 20); do
+            echo "::group::run $run"
+            cargo test -p scratchbox-core --test watcher || exit 1
+            echo "::endgroup::"
+          done
