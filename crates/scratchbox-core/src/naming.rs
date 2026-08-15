@@ -70,6 +70,18 @@ pub fn slugged_name(original: &NoteId, slug: &str) -> String {
     }
 }
 
+/// The `YYYY-MM-DD-HHMM` a note was born with, if it has one.
+///
+/// This part of a name never changes: the rename-on-first-content only appends a slug.
+/// That immutability is what lets a stale manifest entry be matched to the file it became.
+pub fn timestamp_prefix(name: &str) -> Option<&str> {
+    let (stem, _) = split_extension(name);
+    match stem.split_at_checked(TIMESTAMP_LEN) {
+        Some((head, _)) if is_timestamp(head) => Some(head),
+        _ => None,
+    }
+}
+
 /// Disambiguate a name that is already taken: `note.md` becomes `note-2.md`.
 ///
 /// Used for two notes created in the same minute, for a rename onto an existing name, and

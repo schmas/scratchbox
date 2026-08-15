@@ -1,7 +1,7 @@
 //! [`Store`] over a plain directory of plain files.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,23 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use jiff::Zoned;
 
+use crate::atomic::{self, TEMP_PREFIX};
 use crate::config::APP_SUBDIR;
 use crate::error::{Error, Result};
 use crate::naming;
 use crate::note::{Format, NoteId, NoteMeta};
+use crate::order::OrderStore;
 use crate::store::{Store, StoreEvent, WorkspaceHealth};
 use crate::suppress::Suppressor;
 use crate::watcher::{self, WatcherHandle};
-
-/// Notes are owner-only. A scratchpad collects API keys and passwords whether or not it
-/// was meant to, and the two creation paths would otherwise disagree — a temp file starts
-/// at 0600 while a plain create follows the umask.
-#[cfg(unix)]
-const NOTE_MODE: u32 = 0o600;
-
-/// Prefix for in-flight files. The leading dot keeps them out of `list()` — and out of a
-/// note name, since [`NoteId`] refuses names starting with a dot.
-const TEMP_PREFIX: &str = ".tmp-";
 
 /// Bound on collision-suffix probing, so a pathological directory cannot spin forever.
 const MAX_NAME_ATTEMPTS: usize = 1000;
@@ -33,6 +25,7 @@ const MAX_NAME_ATTEMPTS: usize = 1000;
 pub struct FolderSync {
     workspace: PathBuf,
     trash: PathBuf,
+    order: OrderStore,
     events: Sender<StoreEvent>,
     inbox: Receiver<StoreEvent>,
     subscribed: AtomicBool,
@@ -52,6 +45,7 @@ impl FolderSync {
 
         let (events, inbox) = unbounded();
         Ok(Self {
+            order: OrderStore::new(&workspace.join(APP_SUBDIR)),
             suppressor: Arc::new(Suppressor::new(workspace.clone())),
             workspace,
             trash,
@@ -89,6 +83,11 @@ impl FolderSync {
 
     pub fn trash(&self) -> &Path {
         &self.trash
+    }
+
+    /// The order manifest for this workspace.
+    pub fn order(&self) -> &OrderStore {
+        &self.order
     }
 
     /// The registry of writes this store is about to make. Exposed for tests.
@@ -204,7 +203,7 @@ impl FolderSync {
 
         let result = (|| {
             let mut input = File::open(source).map_err(Error::io("read", source))?;
-            let mut staged = create_note_file(&staging).map_err(Error::io("write", &staging))?;
+            let mut staged = atomic::create(&staging).map_err(Error::io("write", &staging))?;
             io::copy(&mut input, &mut staged).map_err(Error::io("copy", &staging))?;
             staged
                 .sync_all()
@@ -264,26 +263,13 @@ impl Store for FolderSync {
     /// filesystem as `/tmp`.
     fn write(&self, id: &NoteId, content: &str) -> Result<()> {
         let target = self.resolve(id)?;
-        let staging = self.workspace.join(format!("{TEMP_PREFIX}{}", id.as_str()));
 
         // Announced before the write rather than after: the watcher can deliver the event
-        // before the rename below has returned, and an unannounced echo reloads the note
+        // before the write has even returned, and an unannounced echo reloads the note
         // over whatever the user has typed since.
         self.suppressor.register_write(id, content);
 
-        let result = (|| {
-            let mut file = create_note_file(&staging).map_err(Error::io("write", &staging))?;
-            file.write_all(content.as_bytes())
-                .map_err(Error::io("write", &staging))?;
-            file.sync_all().map_err(Error::io("flush", &staging))
-        })();
-
-        if let Err(error) = result {
-            let _ = fs::remove_file(&staging);
-            return Err(error);
-        }
-
-        fs::rename(&staging, &target).map_err(Error::io("replace", &target))
+        atomic::write_atomically(&target, content.as_bytes())
     }
 
     fn create(&self, format: Format) -> Result<NoteId> {
@@ -300,7 +286,7 @@ impl Store for FolderSync {
 
             // `create_new` both tests and claims the name, so two notes made in the same
             // minute cannot race through a look-then-create gap onto one file.
-            match create_note_file_exclusive(&path) {
+            match atomic::create_new(&path) {
                 Ok(_) => return Ok(id),
                 Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(source) => return Err(Error::io("create", &path)(source)),
@@ -328,6 +314,11 @@ impl Store for FolderSync {
         self.suppressor.register_rename(from, &id);
 
         fs::rename(&source, &target).map_err(Error::io("rename", &source))?;
+
+        // The note has already moved, so a manifest that cannot be updated must not fail
+        // the rename. Nothing is lost either way: reconciliation repairs a stale entry by
+        // matching the timestamp prefix, which is precisely this situation.
+        let _ = self.order.record_rename(from, &id);
         Ok(id)
     }
 
@@ -335,6 +326,10 @@ impl Store for FolderSync {
         let source = self.resolve(id)?;
         let name = Self::free_name(&self.trash, id.as_str())?;
         let target = self.trash.join(name);
+
+        // Same reasoning as in `rename`: reconciliation prunes an entry whose file is
+        // gone, so a failed manifest update cannot lose anything.
+        let _ = self.order.record_removal(id);
 
         match fs::rename(&source, &target) {
             Ok(()) => Ok(()),
@@ -355,27 +350,6 @@ impl Store for FolderSync {
         );
         self.inbox.clone()
     }
-}
-
-/// Create or truncate a note file, owner-only where the platform has a notion of it.
-fn create_note_file(path: &Path) -> io::Result<File> {
-    note_options().create(true).truncate(true).open(path)
-}
-
-/// Create a note file, failing if the name is already taken.
-fn create_note_file_exclusive(path: &Path) -> io::Result<File> {
-    note_options().create_new(true).open(path)
-}
-
-fn note_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(NOTE_MODE);
-    }
-    options
 }
 
 #[cfg(test)]

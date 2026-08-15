@@ -3,11 +3,13 @@
 //! Contains no terminal or widget types: everything here is usable from the TUI, the
 //! CLI, and tests alike.
 
+mod atomic;
 pub mod config;
 mod error;
 pub mod foldersync;
 pub mod naming;
 pub mod note;
+pub mod order;
 pub mod store;
 pub mod suppress;
 pub mod watcher;
@@ -20,5 +22,6 @@ pub use config::{APP_SUBDIR, Config, Dirs};
 pub use error::{Error, Result};
 pub use foldersync::FolderSync;
 pub use note::{Format, InvalidNoteId, NoteId, NoteMeta};
+pub use order::{OrderStore, reconcile};
 pub use store::{Store, StoreEvent, WorkspaceHealth};
 pub use suppress::Suppressor;
