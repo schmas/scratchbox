@@ -43,11 +43,17 @@ fn open_tui(
 ///
 /// Waits out the debounce window rather than sleeping a guessed interval: the watcher
 /// coalesces by design, so the answer is not available before it has elapsed.
-fn drain(app: &mut App, events: &crossbeam_channel::Receiver<scratchbox_core::StoreEvent>) {
+fn drain(
+    app: &mut App,
+    events: &crossbeam_channel::Receiver<scratchbox_core::StoreEvent>,
+) -> usize {
     let until = Instant::now() + DEBOUNCE_WINDOW + Duration::from_millis(400);
+    let mut delivered = 0;
     while let Ok(event) = events.recv_deadline(until) {
         app.apply_store_event(&event).unwrap();
+        delivered += 1;
     }
+    delivered
 }
 
 fn type_text(app: &mut App, text: &str) {
@@ -70,11 +76,28 @@ fn an_append_reaches_an_open_editor_that_has_nothing_unsaved() {
     );
     assert_eq!(output.status.code().unwrap(), 0);
 
-    drain(&mut app, &events);
+    let delivered = drain(&mut app, &events);
 
     assert_eq!(app.editor().text(), "already here\nfrom the hotkey\n");
     assert_eq!(app.conflict(), None, "a clean buffer should just reload");
     assert!(!app.editor().is_dirty());
+
+    // The loop draws once per event, so this is the repaint count for one append.
+    //
+    // An append is several filesystem operations — a temp file written, then renamed over
+    // the target — and macOS reports them separately, sometimes as a `Created` and a
+    // `Modified` for the same path. Those are different variants, so the watcher's
+    // deduplication cannot collapse them and two events arrive rather than one. Both
+    // describe the same final content, which makes the second repaint redundant rather
+    // than wrong: the buffer is already correct when it happens.
+    //
+    // Bounded rather than pinned to a number, because whether the two operations land in
+    // one debounce window is a matter of timing. What matters is that the count stays a
+    // small constant instead of tracking the number of filesystem operations.
+    assert!(
+        (1..=2).contains(&delivered),
+        "one append produced {delivered} events; the debouncer is not collapsing them"
+    );
 }
 
 /// The data-loss path the plan singles out. The append must not be reloaded over the user's
