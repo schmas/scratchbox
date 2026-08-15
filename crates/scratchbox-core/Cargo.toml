@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Headless core for scratchbox: config, notes, storage, watcher."
 
 [dependencies]
+crossbeam-channel.workspace = true
 directories.workspace = true
 jiff.workspace = true
 serde.workspace = true
