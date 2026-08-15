@@ -9,6 +9,7 @@ pub mod foldersync;
 pub mod naming;
 pub mod note;
 pub mod store;
+pub mod suppress;
 
 /// Re-exported because [`naming::new_note_name`] takes a `Zoned`, so callers need the
 /// same `jiff` this crate was built against.
@@ -19,3 +20,4 @@ pub use error::{Error, Result};
 pub use foldersync::FolderSync;
 pub use note::{Format, InvalidNoteId, NoteId, NoteMeta};
 pub use store::{Store, StoreEvent, WorkspaceHealth};
+pub use suppress::Suppressor;
