@@ -27,4 +27,7 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    #[error(transparent)]
+    InvalidNoteId(#[from] crate::note::InvalidNoteId),
 }
