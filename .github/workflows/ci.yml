@@ -56,13 +56,25 @@ jobs:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build test binary once
-        run: cargo build --tests -p scratchbox-core
+      - name: Build test binaries once
+        run: cargo build --tests -p scratchbox-core -p scratchbox-tui
 
       - name: Run the watcher suite 20 times
         run: |
           for run in $(seq 1 20); do
             echo "::group::run $run"
             cargo test -p scratchbox-core --test watcher || exit 1
+            echo "::endgroup::"
+          done
+
+      # The one Phase 7 test that drives a real watcher rather than synthetic events. It is
+      # where suppression and autosave meet, so it belongs under the same repetition: a
+      # single green run would hide a window that is one event too short.
+      - name: Run the live-watcher save test 20 times
+        run: |
+          for run in $(seq 1 20); do
+            echo "::group::run $run"
+            cargo test -p scratchbox-tui --test save_flow \
+              repeated_saves_under_a_live_watcher || exit 1
             echo "::endgroup::"
           done

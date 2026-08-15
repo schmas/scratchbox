@@ -4,4 +4,5 @@ pub mod app;
 pub mod editor;
 pub mod event;
 pub mod keys;
+pub mod save;
 pub mod ui;

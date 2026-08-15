@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use ratatui::DefaultTerminal;
@@ -130,8 +131,12 @@ fn event_loop(
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        // Nothing to save yet, so there is no reason to wake up until something happens.
-        let Some(event) = events.next(None) else {
+        // With nothing pending this is `None` and the loop simply blocks: an idle
+        // scratchpad should cost nothing at all.
+        let timeout = app
+            .wake_at()
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        let Some(event) = events.next(timeout) else {
             return Ok(());
         };
 
@@ -147,7 +152,11 @@ fn event_loop(
                     app_error(app, error);
                 }
             }
-            AppEvent::Tick => {}
+            AppEvent::Tick => {
+                if let Err(error) = app.on_tick() {
+                    app_error(app, error);
+                }
+            }
         }
 
         if app.should_quit() {
@@ -167,11 +176,20 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> scratchbox_core
         };
     }
 
+    // An unresolved external change owns the keyboard until it is answered: every other
+    // path through the app either reloads the buffer or writes it, and both would decide
+    // for the user which version of the note survives.
+    if app.conflict().is_some() {
+        return match keys::map_conflict(key) {
+            Action::KeepMine => app.keep_mine(),
+            Action::TakeTheirs => app.take_theirs(),
+            Action::Quit => app.quit(),
+            _ => Ok(()),
+        };
+    }
+
     match keys::map(key, app.focus()) {
-        Action::Quit => {
-            app.quit();
-            Ok(())
-        }
+        Action::Quit => app.quit(),
         Action::NewNote => app.create_note(),
         Action::RequestDelete => {
             app.request_delete();
@@ -186,10 +204,14 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> scratchbox_core
             Ok(())
         }
         Action::Edit(key) => {
-            app.editor_mut().on_key(key);
+            app.edit(key);
             Ok(())
         }
-        Action::ConfirmDelete | Action::CancelDelete | Action::Ignore => Ok(()),
+        Action::ConfirmDelete
+        | Action::CancelDelete
+        | Action::KeepMine
+        | Action::TakeTheirs
+        | Action::Ignore => Ok(()),
     }
 }
 

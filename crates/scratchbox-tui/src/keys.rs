@@ -19,6 +19,8 @@ pub enum Action {
     SelectPrevious,
     SelectNext,
     ToggleFocus,
+    KeepMine,
+    TakeTheirs,
     /// Hand the key to the editor.
     Edit(KeyEvent),
     Ignore,
@@ -32,6 +34,24 @@ pub fn map_confirmation(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::ConfirmDelete,
         _ => Action::CancelDelete,
+    }
+}
+
+/// What a key means while an external change is waiting to be resolved.
+///
+/// Everything else is swallowed, exactly as for a delete. The buffer's fate is undecided,
+/// and letting the user pile more edits onto it would only make the choice harder — and
+/// would let a stray `k` answer a question about whose version of a note survives.
+///
+/// Quit is the one way out that is not an answer: it leaves the external change on disk
+/// and drops the buffer, which beats trapping the user in a prompt.
+pub fn map_conflict(key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match (key.code, ctrl) {
+        (KeyCode::Char('q'), true) | (KeyCode::Char('c'), true) => Action::Quit,
+        (KeyCode::Char('k') | KeyCode::Char('K'), false) => Action::KeepMine,
+        (KeyCode::Char('t') | KeyCode::Char('T'), false) => Action::TakeTheirs,
+        _ => Action::Ignore,
     }
 }
 

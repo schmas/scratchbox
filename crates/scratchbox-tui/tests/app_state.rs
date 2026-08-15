@@ -57,8 +57,7 @@ fn names(app: &App) -> Vec<&str> {
 
 fn type_text(app: &mut App, text: &str) {
     for c in text.chars() {
-        app.editor_mut()
-            .on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        app.edit(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
 }
 
@@ -250,9 +249,7 @@ fn escape_does_not_change_how_typing_behaves() {
     let mut f = fixture(&[("a.md", "")]);
 
     type_text(&mut f.app, "one");
-    f.app
-        .editor_mut()
-        .on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    f.app.edit(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     type_text(&mut f.app, " two");
 
     assert_eq!(f.app.editor().text(), "one two");
@@ -266,14 +263,12 @@ fn undo_takes_back_an_edit_and_redo_puts_it_back() {
     type_text(&mut f.app, "hello world");
 
     f.app
-        .editor_mut()
-        .on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        .edit(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     let undone = f.app.editor().text();
     assert_ne!(undone, "hello world", "ctrl+u changed nothing");
 
     f.app
-        .editor_mut()
-        .on_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        .edit(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
 
     assert_eq!(
         f.app.editor().text(),
@@ -294,14 +289,14 @@ fn undo_history_does_not_survive_a_note_switch() {
     f.app.select_next().unwrap();
     f.app.select_previous().unwrap();
 
-    // The buffer is reloaded from disk, so the unsaved edit is gone and so is its history.
-    assert_eq!(f.app.editor().text(), "original");
+    // The edit itself survives — switching notes saves first — but the buffer it lives in
+    // was rebuilt from disk on the way back, and the undo stack went with the old one.
+    assert_eq!(f.app.editor().text(), "typed original");
     f.app
-        .editor_mut()
-        .on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        .edit(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     assert_eq!(
         f.app.editor().text(),
-        "original",
+        "typed original",
         "undo reached across a note switch"
     );
 }

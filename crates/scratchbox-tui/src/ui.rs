@@ -7,9 +7,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use scratchbox_core::Format;
+use scratchbox_core::{Format, WorkspaceHealth};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Conflict, Focus};
 
 /// Wide enough for a timestamped name plus its format tag, narrow enough to leave the
 /// editor the room that matters.
@@ -27,6 +27,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     if app.pending_delete().is_some() {
         render_delete_prompt(frame, app, body);
+    } else if let Some(conflict) = app.conflict() {
+        render_conflict_prompt(frame, app, conflict, body);
     }
 }
 
@@ -75,15 +77,32 @@ fn render_editor(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// The status line, in priority order.
+///
+/// A conflict outranks everything: it is a question, and the app is not accepting anything
+/// else until it is answered. An unavailable workspace outranks the ordinary status because
+/// it changes what every subsequent keystroke means.
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let text = match app.status() {
-        Some(status) => status.to_owned(),
-        None => "^N new   ^D delete   alt-↑/↓ reorder   tab switch pane   ^Q quit".to_owned(),
+    let (text, color) = match (app.conflict(), app.health()) {
+        (Some(_), _) => (
+            "external change — [k]eep mine · [t]ake theirs · ^Q quit".to_owned(),
+            Color::Yellow,
+        ),
+        (None, WorkspaceHealth::Missing | WorkspaceHealth::ReadOnly) => (
+            "workspace unavailable — edits are in memory only".to_owned(),
+            Color::Yellow,
+        ),
+        (None, WorkspaceHealth::Ok) => (
+            match app.status() {
+                Some(status) => status.to_owned(),
+                None => {
+                    "^N new   ^D delete   alt-↑/↓ reorder   tab switch pane   ^Q quit".to_owned()
+                }
+            },
+            Color::DarkGray,
+        ),
     };
-    frame.render_widget(
-        Paragraph::new(text).style(Style::new().fg(Color::DarkGray)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)), area);
 }
 
 fn render_delete_prompt(frame: &mut Frame, app: &App, area: Rect) {
@@ -108,6 +127,54 @@ fn render_delete_prompt(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let area = centered(area, 60, 5);
+    frame.render_widget(Clear, area);
+    frame.render_widget(prompt, area);
+}
+
+/// The external-change prompt.
+///
+/// On screen as a panel rather than only in the status line because the editor stops
+/// accepting keys while it is up. A user who typed and saw nothing happen needs to be told
+/// why in the place they are already looking.
+fn render_conflict_prompt(frame: &mut Frame, app: &App, conflict: Conflict, area: Rect) {
+    let name = app
+        .editor()
+        .loaded()
+        .map(|id| id.as_str().to_owned())
+        .unwrap_or_else(|| "this note".to_owned());
+
+    let what = match conflict {
+        Conflict::Changed => format!("{name} changed on disk while you had unsaved edits."),
+        Conflict::Deleted => format!("{name} was deleted while you had unsaved edits."),
+    };
+    let keep = match conflict {
+        Conflict::Changed => "k  keep mine (write my buffer over theirs)",
+        Conflict::Deleted => "k  keep mine (write my buffer back to disk)",
+    };
+    let take = match conflict {
+        Conflict::Changed => "t  take theirs (discard my edits)",
+        Conflict::Deleted => "t  take theirs (let the note go)",
+    };
+
+    let prompt = Paragraph::new(vec![
+        Line::from(what),
+        Line::from(""),
+        Line::from(keep),
+        Line::from(take),
+        Line::from(Span::styled(
+            "^Q  quit without saving",
+            Style::new().fg(Color::DarkGray),
+        )),
+    ])
+    .wrap(Wrap { trim: true })
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" External change ")
+            .border_style(Style::new().fg(Color::Yellow)),
+    );
+
+    let area = centered(area, 62, 8);
     frame.render_widget(Clear, area);
     frame.render_widget(prompt, area);
 }
