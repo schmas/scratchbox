@@ -258,6 +258,14 @@ fn an_external_write_during_our_own_window_is_not_suppressed() {
     );
 }
 
+/// Suppression reads the file to fingerprint it, and that read can fail. RT-8's rule is
+/// that an unreadable file never suppresses and never panics.
+///
+/// Only the watcher's survival is asserted here. Whether the vanishing itself produces an
+/// event is up to the platform: inotify's debouncer cancels a create and a delete that fall
+/// inside one window, so on Linux this sequence legitimately reports nothing. That the
+/// event is not *suppressed* is proven deterministically in the `suppress` unit tests,
+/// where no debouncer sits in the way.
 #[test]
 fn a_registration_whose_file_vanishes_does_not_kill_the_watcher() {
     let w = watched();
@@ -265,13 +273,8 @@ fn a_registration_whose_file_vanishes_does_not_kill_the_watcher() {
     settle(&w.events);
 
     w.store.write(&note, "body").unwrap();
-    // Removed before the debounced event arrives, so the fingerprint read fails.
+    // Gone before the debounced event arrives, so the fingerprint read fails.
     fs::remove_file(w.workspace.join(note.as_str())).unwrap();
-
-    assert!(
-        wait_for(&w.events, |e| named(e, note.as_str())).is_some(),
-        "the vanished note's event never arrived"
-    );
 
     // The watcher thread is still alive and still delivering.
     fs::write(w.workspace.join("later.md"), "still working").unwrap();

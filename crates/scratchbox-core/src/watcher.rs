@@ -19,6 +19,11 @@ use crate::suppress::Suppressor;
 ///
 /// Long enough that a burst of writes lands as one event, short enough that a change made
 /// in another window shows up while the user is still looking at it.
+///
+/// Known consequence: a file created and deleted inside one window can cancel out and be
+/// reported not at all. In practice that needs an external deletion within half a second of
+/// one of our own saves, and it leaves a stale row in the list until the next event. The
+/// alternative is polling, which this design rejects outright.
 pub const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 
 /// Owns the watcher thread. Dropping this stops watching.
