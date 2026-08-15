@@ -1,0 +1,16 @@
+[package]
+name = "scratchbox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Append stdin to the active scratchbox note without opening the TUI."
+
+[[bin]]
+name = "scratchbox"
+path = "src/main.rs"
+
+[dependencies]
+scratchbox-core.workspace = true
+
+anyhow.workspace = true

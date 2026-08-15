@@ -1,0 +1,16 @@
+[package]
+name = "scratchbox-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless core for scratchbox: config, notes, storage, watcher."
+
+[dependencies]
+directories.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

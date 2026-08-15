@@ -1,0 +1,30 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/schmas/scratchbox"
+
+[workspace.dependencies]
+scratchbox-core = { path = "crates/scratchbox-core" }
+
+ratatui = { version = "0.30.2", features = ["crossterm"] }
+crossterm = "0.29.0"
+edtui = "0.11.6"
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+syntect = "5.3.0"
+two-face = "0.5.2"
+directories = "6.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+jiff = "0.2.35"
+slug = "0.1.6"
+crossbeam-channel = "0.5.16"
+anyhow = "1.0.104"
+thiserror = "2.0.20"
+walkdir = "2.5.0"
+tempfile = "3.27.0"

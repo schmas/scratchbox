@@ -1,0 +1,15 @@
+[package]
+name = "scratchbox-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI for scratchbox."
+
+[dependencies]
+scratchbox-core.workspace = true
+
+anyhow.workspace = true
+crossterm.workspace = true
+edtui.workspace = true
+ratatui.workspace = true

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # No Windows runner: D4 defers Windows support this cycle, and a job that reports
+  # green for an untested platform is worse than no job at all.
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the version and components.
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      # Phase 1 risk gate: edtui must stay compatible with ratatui, modeless, and
+      # undoable. It exits non-zero if any of that regresses.
+      - name: edtui spike
+        run: cargo run -p scratchbox-tui --example spike_editor
