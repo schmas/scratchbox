@@ -10,6 +10,7 @@ pub mod naming;
 pub mod note;
 pub mod store;
 pub mod suppress;
+pub mod watcher;
 
 /// Re-exported because [`naming::new_note_name`] takes a `Zoned`, so callers need the
 /// same `jiff` this crate was built against.

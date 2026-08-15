@@ -135,9 +135,6 @@ impl Suppressor {
     }
 
     /// Should this event be dropped as an echo of our own work?
-    ///
-    /// A matching entry is consumed, so a second event for the same registration is
-    /// treated as genuinely external.
     pub fn should_suppress(&self, event: &StoreEvent) -> bool {
         self.sweep();
         let mut pending = self.lock();
@@ -153,11 +150,16 @@ impl Suppressor {
             return false;
         }
 
-        let Some(index) = pending.iter().position(|entry| self.matches(entry, event)) else {
-            return false;
-        };
-        pending.remove(index);
-        true
+        // Matching does not spend the entry; the TTL does.
+        //
+        // A registration is a statement about a state of the disk, not about one event:
+        // "the file holding exactly this content is our doing", "these two names changing
+        // places is our doing". Both stay true for as long as they are true, and platforms
+        // report one logical change as several events — a rename on macOS arrives as a
+        // removal of the old name and a creation of the new one, sometimes with a stale
+        // create alongside. Spending the entry on the first would let the rest through,
+        // which is the whole failure this registry exists to prevent.
+        pending.iter().any(|entry| self.matches(entry, event))
     }
 
     /// Live entries. Exposed so a test can prove the registry does not grow without bound.
@@ -243,16 +245,17 @@ mod tests {
         (tmp, suppressor)
     }
 
+    /// One save can arrive as several events — macOS sends a create and a modify for a
+    /// single atomic write — so every event describing the content we wrote is an echo.
     #[test]
-    fn our_own_write_is_suppressed_once() {
+    fn every_event_describing_our_own_content_is_suppressed() {
         let (tmp, suppressor) = fixture();
         fs::write(tmp.path().join("note.md"), "ours").unwrap();
         suppressor.register_write(&id("note.md"), "ours");
 
-        let event = StoreEvent::Modified(id("note.md"));
-        assert!(suppressor.should_suppress(&event));
-        // The entry is spent, so a second event counts as somebody else's.
-        assert!(!suppressor.should_suppress(&event));
+        assert!(suppressor.should_suppress(&StoreEvent::Created(id("note.md"))));
+        assert!(suppressor.should_suppress(&StoreEvent::Modified(id("note.md"))));
+        assert!(suppressor.should_suppress(&StoreEvent::Modified(id("note.md"))));
     }
 
     #[test]

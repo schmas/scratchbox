@@ -10,6 +10,15 @@ use crate::Result;
 use crate::note::{Format, NoteId, NoteMeta};
 
 /// A change to the stored notes.
+///
+/// **`Created` and `Modified` are not reliably distinguishable.** macOS FSEvents keeps
+/// reporting a path as created for as long as its created flag is set, so an edit to an
+/// existing note arrives as `Created` there and as `Modified` on Linux. Both mean the same
+/// thing to a caller — this note exists and its contents may have changed — so treat them
+/// alike and never branch on which one arrived.
+///
+/// `Removed` is trustworthy: the watcher confirms every event against the disk before
+/// reporting it, precisely because the reported kind cannot be trusted on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreEvent {
     Created(NoteId),

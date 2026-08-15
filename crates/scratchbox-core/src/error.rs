@@ -49,6 +49,9 @@ pub enum Error {
 
     #[error("could not find a free name for {name} after {tried} attempts")]
     NoFreeName { name: String, tried: usize },
+
+    #[error("could not watch the workspace")]
+    Watch(#[from] notify::Error),
 }
 
 impl Error {

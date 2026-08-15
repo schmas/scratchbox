@@ -3,6 +3,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -13,6 +14,8 @@ use crate::error::{Error, Result};
 use crate::naming;
 use crate::note::{Format, NoteId, NoteMeta};
 use crate::store::{Store, StoreEvent, WorkspaceHealth};
+use crate::suppress::Suppressor;
+use crate::watcher::{self, WatcherHandle};
 
 /// Notes are owner-only. A scratchpad collects API keys and passwords whether or not it
 /// was meant to, and the two creation paths would otherwise disagree — a temp file starts
@@ -33,6 +36,8 @@ pub struct FolderSync {
     events: Sender<StoreEvent>,
     inbox: Receiver<StoreEvent>,
     subscribed: AtomicBool,
+    suppressor: Arc<Suppressor>,
+    watcher: Option<WatcherHandle>,
 }
 
 impl FolderSync {
@@ -47,12 +52,35 @@ impl FolderSync {
 
         let (events, inbox) = unbounded();
         Ok(Self {
+            suppressor: Arc::new(Suppressor::new(workspace.clone())),
             workspace,
             trash,
             events,
             inbox,
             subscribed: AtomicBool::new(false),
+            watcher: None,
         })
+    }
+
+    /// Begin reporting changes made outside the app through [`Store::subscribe`].
+    ///
+    /// Opt-in rather than automatic: the CLI appends a line and exits, and has no use for
+    /// a watcher thread.
+    pub fn start_watching(&mut self) -> Result<()> {
+        if self.watcher.is_some() {
+            return Ok(());
+        }
+        self.watcher = Some(watcher::spawn(
+            &self.workspace,
+            Arc::clone(&self.suppressor),
+            self.events.clone(),
+        )?);
+        Ok(())
+    }
+
+    /// Stop reporting external changes.
+    pub fn stop_watching(&mut self) {
+        self.watcher = None;
     }
 
     pub fn workspace(&self) -> &Path {
@@ -63,7 +91,12 @@ impl FolderSync {
         &self.trash
     }
 
-    /// The sending half of the event channel, for the watcher to feed.
+    /// The registry of writes this store is about to make. Exposed for tests.
+    pub fn suppressor(&self) -> &Arc<Suppressor> {
+        &self.suppressor
+    }
+
+    /// The sending half of the event channel, for feeding synthetic events in tests.
     pub fn events(&self) -> Sender<StoreEvent> {
         self.events.clone()
     }
@@ -233,6 +266,11 @@ impl Store for FolderSync {
         let target = self.resolve(id)?;
         let staging = self.workspace.join(format!("{TEMP_PREFIX}{}", id.as_str()));
 
+        // Announced before the write rather than after: the watcher can deliver the event
+        // before the rename below has returned, and an unannounced echo reloads the note
+        // over whatever the user has typed since.
+        self.suppressor.register_write(id, content);
+
         let result = (|| {
             let mut file = create_note_file(&staging).map_err(Error::io("write", &staging))?;
             file.write_all(content.as_bytes())
@@ -284,6 +322,10 @@ impl Store for FolderSync {
         let name = Self::free_name(&self.workspace, to.as_str())?;
         let id = NoteId::new(&name)?;
         let target = self.workspace.join(&name);
+
+        // The name that will actually land, so the echo is recognized whichever half of
+        // the rename the platform reports.
+        self.suppressor.register_rename(from, &id);
 
         fs::rename(&source, &target).map_err(Error::io("rename", &source))?;
         Ok(id)
