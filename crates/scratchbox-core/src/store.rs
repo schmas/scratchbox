@@ -81,6 +81,20 @@ pub trait Store: Send {
     /// Move a note to the trash. Never unlinks a note that did not reach the trash first.
     fn delete(&self, id: &NoteId) -> Result<()>;
 
+    /// Is the store still usable?
+    ///
+    /// Part of the seam because every backend can become unreachable — a cloud mount goes
+    /// offline, a network store loses its connection — and the caller needs to degrade
+    /// instead of retrying a doomed save every few hundred milliseconds forever.
+    fn health(&self) -> WorkspaceHealth;
+
+    /// Begin reporting changes made outside the app.
+    ///
+    /// Separate from construction because it can be slow: bringing up an FSEvents stream
+    /// on macOS takes roughly 140ms, and a user should be looking at their notes well
+    /// before that. Callers start it once the first frame is on screen.
+    fn start_watching(&mut self) -> Result<()>;
+
     /// Receive store events.
     ///
     /// **Single-subscriber.** This is a `crossbeam` channel, which distributes messages

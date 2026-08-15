@@ -10,6 +10,10 @@ description = "Terminal UI for scratchbox."
 scratchbox-core.workspace = true
 
 anyhow.workspace = true
+crossbeam-channel.workspace = true
 crossterm.workspace = true
 edtui.workspace = true
 ratatui.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

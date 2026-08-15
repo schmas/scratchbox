@@ -56,27 +56,6 @@ impl FolderSync {
         })
     }
 
-    /// Begin reporting changes made outside the app through [`Store::subscribe`].
-    ///
-    /// Opt-in rather than automatic: the CLI appends a line and exits, and has no use for
-    /// a watcher thread.
-    pub fn start_watching(&mut self) -> Result<()> {
-        if self.watcher.is_some() {
-            return Ok(());
-        }
-        self.watcher = Some(watcher::spawn(
-            &self.workspace,
-            Arc::clone(&self.suppressor),
-            self.events.clone(),
-        )?);
-        Ok(())
-    }
-
-    /// Stop reporting external changes.
-    pub fn stop_watching(&mut self) {
-        self.watcher = None;
-    }
-
     pub fn workspace(&self) -> &Path {
         &self.workspace
     }
@@ -98,16 +77,6 @@ impl FolderSync {
     /// The sending half of the event channel, for feeding synthetic events in tests.
     pub fn events(&self) -> Sender<StoreEvent> {
         self.events.clone()
-    }
-
-    /// Is the workspace still there and writable?
-    pub fn health(&self) -> WorkspaceHealth {
-        match fs::metadata(&self.workspace) {
-            Err(_) => WorkspaceHealth::Missing,
-            Ok(meta) if !meta.is_dir() => WorkspaceHealth::Missing,
-            Ok(meta) if meta.permissions().readonly() => WorkspaceHealth::ReadOnly,
-            Ok(_) => WorkspaceHealth::Ok,
-        }
     }
 
     /// Empty the trash, returning how many entries were removed.
@@ -339,6 +308,30 @@ impl Store for FolderSync {
                 self.copy_then_unlink(&source, &target)
             }
             Err(source_error) => Err(Error::io("move to trash", &source)(source_error)),
+        }
+    }
+
+    /// Opt-in rather than automatic: the CLI appends a line and exits, with no use for a
+    /// watcher thread.
+    fn start_watching(&mut self) -> Result<()> {
+        if self.watcher.is_some() {
+            return Ok(());
+        }
+        self.watcher = Some(watcher::spawn(
+            &self.workspace,
+            Arc::clone(&self.suppressor),
+            self.events.clone(),
+        )?);
+        Ok(())
+    }
+
+    /// Is the workspace still there and writable?
+    fn health(&self) -> WorkspaceHealth {
+        match fs::metadata(&self.workspace) {
+            Err(_) => WorkspaceHealth::Missing,
+            Ok(meta) if !meta.is_dir() => WorkspaceHealth::Missing,
+            Ok(meta) if meta.permissions().readonly() => WorkspaceHealth::ReadOnly,
+            Ok(_) => WorkspaceHealth::Ok,
         }
     }
 
