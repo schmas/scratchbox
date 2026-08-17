@@ -16,6 +16,12 @@ serde.workspace = true
 slug.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+# The facade only. No subscriber and no appender here: this crate stays headless, and a
+# library that installed a subscriber would decide for both binaries where diagnostics go.
+tracing.workspace = true
 
 [dev-dependencies]
+# Test binaries install no subscriber of their own, so the watcher suite would otherwise
+# record nothing on the CI runner where its race actually shows up.
+scratchbox-log.workspace = true
 tempfile.workspace = true

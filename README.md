@@ -56,6 +56,7 @@ XDG is honored on macOS too, following terminal-tool convention rather than
 | Config | `~/.config/scratchbox/config.toml` |
 | Workspace | `~/.local/share/scratchbox/notes` |
 | Trash | `~/.local/share/scratchbox/trash` |
+| Diagnostic log | `~/.local/share/scratchbox/log` — only exists if you ask for one, see [Diagnostics](#diagnostics) |
 
 `$XDG_CONFIG_HOME` and `$XDG_DATA_HOME` are honored when set.
 
@@ -88,6 +89,43 @@ trash = "~/.local/share/scratchbox/trash"
 ```
 
 A missing config file means defaults. `--workspace <path>` overrides the config key.
+
+## Diagnostics
+
+**Off by default, and off means nothing exists** — no directory, no file, no thread. Turn it on
+by naming a `scratchbox` target in `RUST_LOG`:
+
+```sh
+RUST_LOG=scratchbox=debug scratchbox-tui
+RUST_LOG=scratchbox=trace echo 'a thought' | scratchbox
+```
+
+A bare `RUST_LOG=info` deliberately does **not** switch it on. `RUST_LOG` is shared across the
+whole Rust ecosystem, and having it in your shell profile should not silently earn you a log
+directory here.
+
+The log goes to a file and never to your terminal — the editor owns the screen, and `scratchbox`
+runs from a hotkey where a stray line would be a visible defect. What lands there:
+
+- Note **ids and byte counts**, never note text. A control character in a note's name is escaped
+  rather than written through, so reading the file cannot execute anything in your terminal.
+- The watcher's events, the suppression decisions, saves, conflicts, and reloads — in order, with
+  millisecond timestamps. This is what makes an intermittent "the editor reloaded over my edit"
+  report diagnosable rather than a matter of reasoning about interleavings.
+
+The directory is created `0700` and the log `0600`, for the same reason the trash sits outside the
+workspace: a scratchpad collects API keys and passwords whether or not it was meant to. It also
+lives outside the workspace so writing to it cannot wake the watcher that is describing it.
+
+It is bounded: `scratchbox-tui` rotates daily and keeps seven days, `scratchbox` truncates once the
+file passes 8 MB. Nothing here can fail the thing it is observing — a bad `RUST_LOG` or an
+unwritable directory costs you the log and nothing else, and `scratchbox` still captures the note.
+
+Remove it whenever you like; nothing depends on it:
+
+```sh
+rm -rf ~/.local/share/scratchbox/log
+```
 
 ## Global hotkey
 

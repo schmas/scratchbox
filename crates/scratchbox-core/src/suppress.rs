@@ -107,6 +107,14 @@ impl Suppressor {
     /// Announce a write before making it, fingerprinting the content from memory so
     /// registration costs no I/O.
     pub fn register_write(&self, id: &NoteId, content: &str) {
+        // The byte count, never the content: this registry sees every note body in the
+        // session, and a diagnostic log is not where a scratchpad's contents belong.
+        tracing::trace!(
+            id = ?id.as_str(),
+            bytes = content.len(),
+            ttl_ms = self.ttl.as_millis(),
+            "registered a write"
+        );
         self.push(Pending {
             id: id.clone(),
             kind: PendingKind::Write(Fingerprint::of_bytes(content.as_bytes())),
@@ -116,6 +124,14 @@ impl Suppressor {
 
     /// Announce a rename before making it. Both names are registered.
     pub fn register_rename(&self, from: &NoteId, to: &NoteId) {
+        // Both halves, because the platforms disagree about how many events a rename is and
+        // reading that disagreement in the log is the point of recording it at all.
+        tracing::trace!(
+            from = ?from.as_str(),
+            to = ?to.as_str(),
+            ttl_ms = self.ttl.as_millis(),
+            "registered a rename"
+        );
         let kind = || PendingKind::Rename {
             from: from.clone(),
             to: to.clone(),
@@ -135,31 +151,55 @@ impl Suppressor {
     }
 
     /// Should this event be dropped as an echo of our own work?
+    ///
+    /// **One snapshot for both checks, and no log write under the guard.** The decision is made
+    /// inside a single `lock()` scope exactly as it was before instrumentation, then the guard is
+    /// given back and only then is anything logged.
+    ///
+    /// Both halves of that matter. `matches` and `is_stale_write` each read a file under the
+    /// guard already, so logging there would put a second I/O operation inside a mutex the
+    /// watcher's translator thread needs to make progress. And splitting the two checks into
+    /// separate lock scopes would leave a window for a concurrent `sweep` — which
+    /// `Suppressor::len` performs, and which `the_registry_empties_itself_when_nothing_arrives`
+    /// calls in a tight loop — to evict between them, turning a suppression into a forwarded
+    /// echo. Neither is a trade worth making for a log line.
     pub fn should_suppress(&self, event: &StoreEvent) -> bool {
         self.sweep();
-        let mut pending = self.lock();
 
-        // A write whose file has become unreadable spends its entry without suppressing
-        // anything: the content it stood for is gone, so the event describes a real change
-        // the UI has to see.
-        if let Some(index) = pending
-            .iter()
-            .position(|entry| self.is_stale_write(entry, event))
-        {
-            pending.remove(index);
+        let (stale, matched) = {
+            let mut pending = self.lock();
+
+            // A write whose file has become unreadable spends its entry without suppressing
+            // anything: the content it stood for is gone, so the event describes a real change
+            // the UI has to see.
+            match pending
+                .iter()
+                .position(|entry| self.is_stale_write(entry, event))
+            {
+                Some(index) => {
+                    pending.remove(index);
+                    (true, false)
+                }
+                // Matching does not spend the entry; the TTL does.
+                //
+                // A registration is a statement about a state of the disk, not about one event:
+                // "the file holding exactly this content is our doing", "these two names
+                // changing places is our doing". Both stay true for as long as they are true,
+                // and platforms report one logical change as several events — a rename on macOS
+                // arrives as a removal of the old name and a creation of the new one, sometimes
+                // with a stale create alongside. Spending the entry on the first would let the
+                // rest through, which is the whole failure this registry exists to prevent.
+                None => (false, pending.iter().any(|e| self.matches(e, event))),
+            }
+        };
+
+        // Guard released. Only now is a write to the log safe.
+        if stale {
+            tracing::debug!(?event, matched = false, "spent a stale write entry");
             return false;
         }
-
-        // Matching does not spend the entry; the TTL does.
-        //
-        // A registration is a statement about a state of the disk, not about one event:
-        // "the file holding exactly this content is our doing", "these two names changing
-        // places is our doing". Both stay true for as long as they are true, and platforms
-        // report one logical change as several events — a rename on macOS arrives as a
-        // removal of the old name and a creation of the new one, sometimes with a stale
-        // create alongside. Spending the entry on the first would let the rest through,
-        // which is the whole failure this registry exists to prevent.
-        pending.iter().any(|entry| self.matches(entry, event))
+        tracing::debug!(?event, matched, "suppression");
+        matched
     }
 
     /// Live entries. Exposed so a test can prove the registry does not grow without bound.
@@ -173,9 +213,43 @@ impl Suppressor {
     }
 
     /// Drop expired entries. Cheap, and called on every event.
+    ///
+    /// Every eviction is announced at `warn`, and that level is deliberate. Slack between
+    /// the TTL and the debounce window is 1.5s; synchronous log writes on the translator
+    /// thread advance the clock while `expires_at` does not, and on a CI runner those writes
+    /// are contended by sibling watcher tests. An entry evicted a moment early forwards an
+    /// event the app made itself, which reds `expect_silence` with a message *identical to a
+    /// genuine suppression-window race*. Making the eviction visible is the only thing that
+    /// tells a reader of the log which of the two they are looking at.
     pub fn sweep(&self) {
         let now = Instant::now();
-        self.lock().retain(|entry| entry.expires_at > now);
+
+        // Collected under the guard, logged after giving it back.
+        let mut evicted = Vec::new();
+        {
+            let mut pending = self.lock();
+            pending.retain(|entry| {
+                if entry.expires_at > now {
+                    return true;
+                }
+                // Age since registration. `expires_at` is always `registered + ttl`, so this
+                // is `(now - expires_at) + ttl` — done in `Duration` arithmetic, since
+                // subtracting from an `Instant` can panic.
+                evicted.push((
+                    entry.id.clone(),
+                    now.duration_since(entry.expires_at) + self.ttl,
+                ));
+                false
+            });
+        }
+
+        for (id, age) in evicted {
+            tracing::warn!(
+                id = ?id.as_str(),
+                age_ms = age.as_millis(),
+                "registration evicted by TTL"
+            );
+        }
     }
 
     fn push(&self, entry: Pending) {

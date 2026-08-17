@@ -360,6 +360,7 @@ impl App {
 
         match self.store.read(&id) {
             Ok(disk) => {
+                tracing::debug!(id = ?id.as_str(), bytes = disk.len(), "buffer reloaded from disk");
                 self.editor.reload(&disk);
                 Ok(())
             }
@@ -374,6 +375,14 @@ impl App {
     }
 
     fn enter_conflict(&mut self, conflict: Conflict) {
+        // `warn`, because reaching here means the app is about to stop autosaving and hand a
+        // decision to the user. In a log read after the fact it is the line that explains why
+        // nothing was written for the rest of the session.
+        tracing::warn!(
+            id = ?self.editor.loaded().map(NoteId::as_str),
+            kind = ?conflict,
+            "conflict entered"
+        );
         self.conflict = Some(conflict);
         // The decisive half of the policy. Autosave that kept running from here would write
         // the buffer straight over the external change, which is the loss the conflicted
@@ -551,6 +560,11 @@ impl App {
                 if self.editor.is_dirty() {
                     self.enter_conflict(Conflict::Changed);
                 } else {
+                    tracing::debug!(
+                        id = ?id.as_str(),
+                        bytes = disk.len(),
+                        "buffer reloaded from disk"
+                    );
                     self.editor.reload(&disk);
                 }
                 Ok(())

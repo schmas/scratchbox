@@ -22,6 +22,7 @@ const APP_NAME: &str = "scratchbox";
 const CONFIG_FILE: &str = "config.toml";
 const NOTES_SUBDIR: &str = "notes";
 const TRASH_SUBDIR: &str = "trash";
+const LOG_SUBDIR: &str = "log";
 
 /// Base directories scratchbox resolves everything else against.
 ///
@@ -102,6 +103,9 @@ pub struct Config {
     pub workspace: PathBuf,
     /// Where deleted notes go. Defaults outside the workspace so deletions never sync.
     pub trash: PathBuf,
+    /// The data home this config resolved against, retained so [`Config::log_dir`] derives
+    /// from it rather than reading the environment a second time.
+    pub data_home: PathBuf,
     /// Non-fatal problems for the front end to show once at startup.
     pub warnings: Vec<String>,
 }
@@ -148,6 +152,7 @@ impl Config {
         Ok(Self {
             workspace,
             trash,
+            data_home: dirs.data_home.clone(),
             warnings,
         })
     }
@@ -155,6 +160,35 @@ impl Config {
     /// `<workspace>/.scratchbox`, holding app state only — never a note.
     pub fn app_dir(&self) -> PathBuf {
         self.workspace.join(APP_SUBDIR)
+    }
+
+    /// `<data_home>/scratchbox/log` — where diagnostics go when they are asked for.
+    ///
+    /// Outside the workspace on purpose, and that is the whole reason it is not
+    /// `<workspace>/.scratchbox/log`: a log line describing a filesystem event, written
+    /// inside the watched tree, produces that same event one debounce window later, which is
+    /// logged, forever. This is the same directory family the trash defaults into, so it
+    /// resolves nothing new.
+    ///
+    /// Deliberately *not* created by [`Config::ensure_dirs`]. Diagnostics are off unless
+    /// `RUST_LOG` asks for them, and a directory left behind for a feature that never ran
+    /// would contradict that.
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    /// use scratchbox_core::{Config, Dirs};
+    ///
+    /// let dirs = Dirs {
+    ///     config_home: PathBuf::from("/nowhere/config"),
+    ///     data_home: PathBuf::from("/data"),
+    ///     home: PathBuf::from("/home/someone"),
+    /// };
+    /// let config = Config::load_with(&dirs, None).unwrap();
+    ///
+    /// assert_eq!(config.log_dir(), PathBuf::from("/data/scratchbox/log"));
+    /// ```
+    pub fn log_dir(&self) -> PathBuf {
+        self.data_home.join(APP_NAME).join(LOG_SUBDIR)
     }
 
     /// Do the trash and the workspace sit inside one another, either way round?

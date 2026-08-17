@@ -8,12 +8,20 @@ description = "Terminal UI for scratchbox."
 
 [dependencies]
 scratchbox-core.workspace = true
+scratchbox-log.workspace = true
 
 anyhow.workspace = true
 crossbeam-channel.workspace = true
 crossterm.workspace = true
 edtui.workspace = true
 ratatui.workspace = true
+tracing.workspace = true
+# This crate alone, and that is the arrangement rather than a cargo feature: features unify
+# across two normal dependents in one workspace build, so a `rolling` feature enabled here
+# would compile `scratchbox-log` with the appender and `scratchbox` would link it. The
+# appender requires `time` non-optionally — rejected by name in `docs/dependencies.md` — plus
+# `symlink`, and `scratchbox` is fired from a global hotkey. See D7.
+tracing-appender.workspace = true
 two-face.workspace = true
 
 [dev-dependencies]

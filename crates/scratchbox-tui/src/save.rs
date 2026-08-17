@@ -35,6 +35,17 @@ pub fn save(store: &dyn Store, order: &OrderStore, editor: &mut EditorPane) -> R
     }
 
     let content = editor.text();
+
+    // A span rather than two loose events, so everything the watcher and the suppressor say
+    // while this save is in flight is attributed to it. That attribution is the point: the
+    // race worth diagnosing is a save and its own echo arriving in the wrong order.
+    //
+    // `info_span!`, not `#[instrument]` — the attribute is a proc macro, and `tracing` is
+    // taken without `attributes` precisely to keep syn/quote/proc-macro2 out of the graph.
+    let span = tracing::info_span!("save", id = ?id.as_str(), bytes = content.len());
+    let _entered = span.enter();
+    tracing::info!("start");
+
     // `Store::write` announces itself to the suppression registry before it touches the
     // disk, which is what keeps the resulting filesystem event from reloading the note
     // over whatever the user types next.
@@ -46,6 +57,7 @@ pub fn save(store: &dyn Store, order: &OrderStore, editor: &mut EditorPane) -> R
     editor.mark_saved(content.clone());
 
     let Some(target) = slug_target(&id, &content) else {
+        tracing::info!(outcome = "written", "finish");
         return Ok(Outcome::Written);
     };
 
@@ -64,6 +76,7 @@ pub fn save(store: &dyn Store, order: &OrderStore, editor: &mut EditorPane) -> R
     // abort the note switch that asked for it.
     let _ = order.record_rename(&id, &landed);
 
+    tracing::info!(outcome = "renamed", landed = ?landed.as_str(), "finish");
     Ok(Outcome::Renamed {
         from: id,
         to: landed,

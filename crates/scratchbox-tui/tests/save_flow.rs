@@ -50,6 +50,10 @@ impl Fixture {
 }
 
 fn fixture(notes: &[(&str, &str)]) -> Fixture {
+    // A no-op after the first call, and off entirely unless `$RUST_LOG` names a `scratchbox`
+    // target and `$SCRATCHBOX_LOG_DIR` says where to write.
+    scratchbox_log::init_for_tests();
+
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path().join("notes");
     let store = FolderSync::new(workspace.clone(), tmp.path().join("trash")).unwrap();
@@ -244,6 +248,11 @@ fn a_failed_save_refuses_the_first_quit_and_allows_the_second() {
 /// suppression window that is one event too short survives a single round.
 #[test]
 fn repeated_saves_under_a_live_watcher_never_reload_over_the_buffer() {
+    // Called here rather than left to `fixture`, which this test deliberately does not use.
+    // It is the one test in the file that drives a real watcher, so CI repeats it twenty times
+    // per OS — and it is the run whose interleaving is worth having on disk when it reds.
+    scratchbox_log::init_for_tests();
+
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path().join("notes");
     let store = FolderSync::new(workspace.clone(), tmp.path().join("trash")).unwrap();

@@ -69,6 +69,7 @@ pub fn spawn(
                 // The backend lost track — an overflow, or an error reading the queue.
                 // Telling the caller to re-list is the honest response.
                 Err(_) => {
+                    tracing::warn!("backend lost track of the workspace; asking for a rescan");
                     if out.send(StoreEvent::Rescan).is_err() {
                         return;
                     }
@@ -80,14 +81,24 @@ pub fn spawn(
             // delete as both a metadata and a data event. A batch is the debouncer's own
             // unit of coalescing, so collapsing duplicates within it reports the change
             // once without merging changes that genuinely happened at different times.
+            let raw = events.len();
             let mut batch = Vec::new();
             for debounced in events {
+                // `?`, never `%`. `Debug` on a `Path` quotes and escapes; `Display` would
+                // put a synced note's name into the file byte for byte, newlines and
+                // terminal escapes included. See the note on the suppression event.
+                tracing::trace!(
+                    kind = ?debounced.event.kind,
+                    paths = ?debounced.event.paths,
+                    "raw event"
+                );
                 for event in translate(&debounced.event, &root) {
                     if !batch.contains(&event) {
                         batch.push(event);
                     }
                 }
             }
+            tracing::debug!(raw, collapsed = batch.len(), "batch translated");
 
             for event in batch {
                 if suppressor.should_suppress(&event) {
@@ -99,8 +110,10 @@ pub fn spawn(
                 // collapse. This adds no delay — it is deduplication, not a second layer
                 // of debouncing, which would make the UI feel sluggish for nothing.
                 if recent.already_reported(&event) {
+                    tracing::trace!(?event, "dropped as already reported");
                     continue;
                 }
+                tracing::debug!(?event, "forwarded");
                 // The receiver is gone; nothing left to report to.
                 if out.send(event).is_err() {
                     return;
@@ -213,4 +226,190 @@ fn note_in_root(path: &Path, root: &Path) -> Option<NoteId> {
         return None;
     }
     NoteId::new(path.file_name()?.to_str()?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, CreateKind, RemoveKind};
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// A raw event as a backend would hand one over.
+    fn raw(kind: EventKind, paths: &[PathBuf]) -> notify::Event {
+        paths.iter().fold(notify::Event::new(kind), |event, path| {
+            event.add_path(path.clone())
+        })
+    }
+
+    /// Canonicalized, because that is what `spawn` hands to `translate` and what every path
+    /// comparison below depends on: on macOS a temp dir under `/var` resolves to
+    /// `/private/var`, and an uncanonicalized root would make every event look external.
+    fn root() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        (tmp, root)
+    }
+
+    fn id(name: &str) -> NoteId {
+        NoteId::new(name).unwrap()
+    }
+
+    #[test]
+    fn only_a_plain_file_directly_in_the_root_is_a_note() {
+        let (_tmp, root) = root();
+
+        assert_eq!(
+            note_in_root(&root.join("note.md"), &root),
+            Some(id("note.md"))
+        );
+
+        // The workspace is flat, so anything nested has the wrong parent — which is what
+        // keeps `.scratchbox/order` from ever being read as a note.
+        assert_eq!(note_in_root(&root.join(".scratchbox/order"), &root), None);
+        assert_eq!(note_in_root(&root.join("sub/note.md"), &root), None);
+
+        // Hidden names cover cloud sidecars and our own in-flight temp files in one rule.
+        assert_eq!(note_in_root(&root.join(".DS_Store"), &root), None);
+        assert_eq!(note_in_root(&root.join(".tmp-note.md"), &root), None);
+
+        assert_eq!(note_in_root(Path::new("/elsewhere/note.md"), &root), None);
+    }
+
+    /// The macOS rule the module doc states: FSEvents reports a deleted file as a content
+    /// change, so the reported kind is a hint and the disk is the authority.
+    #[test]
+    fn a_change_to_a_file_that_is_not_there_is_reported_as_a_removal() {
+        let (_tmp, root) = root();
+        let gone = root.join("gone.md");
+
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+        ] {
+            assert_eq!(
+                translate(&raw(kind, std::slice::from_ref(&gone)), &root),
+                vec![StoreEvent::Removed(id("gone.md"))],
+                "a {kind:?} for a missing file should read as a removal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_creation_of_a_file_that_is_there_stays_a_creation() {
+        let (_tmp, root) = root();
+        fs::write(root.join("note.md"), "body").unwrap();
+
+        assert_eq!(
+            translate(
+                &raw(EventKind::Create(CreateKind::File), &[root.join("note.md")]),
+                &root
+            ),
+            vec![StoreEvent::Created(id("note.md"))]
+        );
+    }
+
+    /// An editor saving through a temp file: the source is not a note, so what the user sees
+    /// is the destination note changing rather than a note appearing from nowhere.
+    #[test]
+    fn an_editor_saving_through_a_temp_file_reads_as_the_note_changing() {
+        let (_tmp, root) = root();
+        fs::write(root.join("note.md"), "body").unwrap();
+
+        let stitched = raw(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &[root.join(".tmp-note.md"), root.join("note.md")],
+        );
+
+        assert_eq!(
+            translate(&stitched, &root),
+            vec![StoreEvent::Modified(id("note.md"))]
+        );
+    }
+
+    #[test]
+    fn a_real_rename_between_two_notes_keeps_both_halves() {
+        let (_tmp, root) = root();
+        fs::write(root.join("new.md"), "body").unwrap();
+
+        let stitched = raw(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &[root.join("old.md"), root.join("new.md")],
+        );
+
+        assert_eq!(
+            translate(&stitched, &root),
+            vec![StoreEvent::Renamed {
+                from: id("old.md"),
+                to: id("new.md")
+            }]
+        );
+    }
+
+    #[test]
+    fn an_event_about_something_that_is_not_a_note_produces_nothing() {
+        let (_tmp, root) = root();
+
+        assert!(
+            translate(
+                &raw(
+                    EventKind::Remove(RemoveKind::File),
+                    &[root.join(".scratchbox/order")]
+                ),
+                &root
+            )
+            .is_empty(),
+            "a manifest write must not reach the caller, or it would spin"
+        );
+    }
+
+    #[test]
+    fn opening_and_reading_a_note_changes_nothing() {
+        let (_tmp, root) = root();
+        fs::write(root.join("note.md"), "body").unwrap();
+
+        assert!(
+            translate(
+                &raw(EventKind::Access(AccessKind::Read), &[root.join("note.md")]),
+                &root
+            )
+            .is_empty()
+        );
+    }
+
+    /// `Any` is the backend saying it does not know what happened. Re-listing is cheaper
+    /// than being wrong, so it is deliberately not guessed at.
+    #[test]
+    fn an_uninformative_event_asks_for_a_rescan() {
+        let (_tmp, root) = root();
+
+        assert_eq!(
+            translate(&raw(EventKind::Any, &[]), &root),
+            vec![StoreEvent::Rescan]
+        );
+        assert_eq!(
+            translate(&raw(EventKind::Other, &[root.join("note.md")]), &root),
+            vec![StoreEvent::Rescan]
+        );
+    }
+
+    #[test]
+    fn an_identical_event_inside_one_window_is_reported_once() {
+        let mut recent = RecentlyEmitted::default();
+        let modified = StoreEvent::Modified(id("note.md"));
+
+        assert!(
+            !recent.already_reported(&modified),
+            "the first report should go through"
+        );
+        assert!(
+            recent.already_reported(&modified),
+            "macOS reports metadata and data separately; the second is redundant"
+        );
+
+        // A different note is a different change, not a repeat of this one.
+        assert!(!recent.already_reported(&StoreEvent::Modified(id("other.md"))));
+        // And so is a different kind of change to the same note.
+        assert!(!recent.already_reported(&StoreEvent::Removed(id("note.md"))));
+    }
 }

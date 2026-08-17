@@ -22,6 +22,13 @@ struct Watched {
 }
 
 fn watched() -> Watched {
+    // Every test in this binary comes through here, and `init_for_tests` is a no-op after the
+    // first call. This suite is the reason the diagnostics exist: CI repeats it twenty times
+    // per OS because an intermittent pass is a race rather than a flake, and a red run used to
+    // leave no record of the interleaving that caused it. Off unless `$RUST_LOG` names a
+    // `scratchbox` target *and* `$SCRATCHBOX_LOG_DIR` says where to write.
+    scratchbox_log::init_for_tests();
+
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path().join("notes");
     let mut store = FolderSync::new(workspace.clone(), tmp.path().join("trash")).unwrap();

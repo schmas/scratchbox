@@ -10,6 +10,7 @@ repository = "https://github.com/schmas/scratchbox"
 
 [workspace.dependencies]
 scratchbox-core = { path = "crates/scratchbox-core" }
+scratchbox-log = { path = "crates/scratchbox-log" }
 
 ratatui = { version = "0.30.2", features = ["crossterm"] }
 crossterm = "0.29.0"
@@ -28,3 +29,26 @@ anyhow = "1.0.104"
 thiserror = "2.0.20"
 walkdir = "2.5.0"
 tempfile = "3.27.0"
+
+# Diagnostics. `default-features = false` on both is load-bearing, not tidiness:
+#
+#   * `tracing`'s defaults include `attributes`, which pulls tracing-attributes and with it
+#     syn/quote/proc-macro2 into `scratchbox-core` — the crate both binaries depend on.
+#     `docs/dependencies.md` treats proc-macro build time as a first-class cost. `span!` and
+#     `event!` cost a few more lines than `#[instrument]` and keep three crates out entirely.
+#   * `tracing-subscriber`'s defaults include `ansi`, which links nu-ansi-term. Omitting the
+#     feature is a stronger guarantee than remembering `.with_ansi(false)` at every call site:
+#     an escape sequence cannot reach the log file because nothing can emit one.
+#
+# Do NOT add a `max_level_*` or `release_max_level_*` feature. A directive above
+# `STATIC_MAX_LEVEL` makes `EnvFilter` print a multi-line warning to stderr, which has no
+# `MakeWriter` and so cannot be redirected into the file — breaking the one rule
+# `scratchbox-log` exists to hold.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+  "fmt",
+  "env-filter",
+] }
+# `scratchbox-tui` only. It requires `time` non-optionally, which `docs/dependencies.md`
+# rejects by name, plus `symlink`. See D7 — a cargo feature cannot keep those out of the CLI.
+tracing-appender = "0.2.5"
