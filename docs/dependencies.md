@@ -36,6 +36,7 @@ least one binary; `dev-only` is a `[dev-dependencies]` entry, absent from
 | `tracing-subscriber` | `scratchbox-log` | ships | The subscriber, `features = ["fmt", "env-filter"]`. |
 | `tracing-appender` | `scratchbox-tui` | ships | Daily rotation for the one process that stays open for hours. Deliberately not in `scratchbox`. |
 | `proptest` | `scratchbox-core` | dev-only | Properties for `naming` and `order::reconcile`. See *Property tests* below. |
+| `rstest` | `scratchbox-core` | dev-only | Labelled `#[case]` rows and tempdir fixtures. See *Parameterized cases* below. |
 
 ### File-only diagnostics
 
@@ -117,15 +118,34 @@ Regression seeds land in `crates/scratchbox-core/tests/<name>.proptest-regressio
 files, not a directory — and are not gitignored, so a genuine counterexample is committed and
 replayed before any novel case.
 
+### Parameterized cases
+
+`tests/naming.rs` was largely input/expected tables written out as individual `#[test]`
+functions; eleven of its sixteen became 56 `#[case]` rows. `tests/config.rs` contributed one
+conversion. **`tests/order.rs` contributed none** — the earlier note here claimed its tests were
+tables too, and they are not: every `reconcile` test encodes one named rule, and folding those
+into anonymous rows would delete the documentation. What `order.rs` wanted was the fixture.
+
+`default-features = false` drops `async-timeout` and with it 16 transitive crates including
+`futures-timer` and `futures-util`. There is no async anywhere in this project.
+
+Two rules worth keeping:
+
+- **Every `#[case]` carries an explicit label.** Measured on rstest 0.26.1: an unlabelled case
+  reports as `case_1`, while `#[case::hand_made_file(...)]` reports as `case_4_hand_made_file`.
+  A failing case has to name its input to be worth anything at 3am, and only the label does that.
+- **A test whose *name* states a decision is not converted.** `only_the_first_line_feeds_the_slug`
+  and the four beside it assert a property of one input rather than mapping inputs to outputs.
+  The rule is convert repetition, not documentation.
+
+Fixtures are local to the file that uses them — `tests/config.rs` and `tests/order.rs` have
+their own — and both expose their temp root, because tests assert against it.
+`tests/foldersync.rs` and `tests/watcher.rs` have two tempdir sites and one, below the threshold
+where a fixture pays for the indirection, and are deliberately left inline.
+
 ## Worth adopting
 
 Tracked as issues rather than applied directly, because each one deserves review on its own.
-
-### `rstest` — parameterized cases for table-shaped tests
-
-`naming`, `order`, and `config` tests are largely input/expected tables written out as
-individual `#[test]` functions. `#[case]` collapses the repetition while keeping one
-reported failure per input.
 
 ### `criterion` — statistics behind the startup budget
 

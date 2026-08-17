@@ -4,13 +4,55 @@
 mod support;
 
 use std::fs;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use rstest::{fixture, rstest};
 use scratchbox_core::note::NoteMeta;
 use scratchbox_core::order::{self, OrderStore};
 use scratchbox_core::{FolderSync, NoteId, Store, reconcile};
 use support::{collect, expect_silence};
 use tempfile::TempDir;
+
+/// A manifest store over its own temp directory.
+///
+/// The `TempDir` is held here, not returned alongside: dropped early it takes the directory
+/// with it and the store's path would point at nothing. `root` is exposed because one test
+/// needs an `OrderStore` over a directory that was deliberately never created.
+struct Manifest {
+    _tmp: TempDir,
+    root: PathBuf,
+    store: OrderStore,
+}
+
+#[fixture]
+fn manifest() -> Manifest {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let store = OrderStore::new(&root);
+    Manifest {
+        _tmp: tmp,
+        root,
+        store,
+    }
+}
+
+/// A workspace and a trash beside it.
+///
+/// A separate fixture from [`manifest`] rather than one that serves both: these tests need a
+/// whole `FolderSync`, and a single fixture returning both would build a store every manifest
+/// test then ignored.
+struct Workspace {
+    _tmp: TempDir,
+    store: FolderSync,
+}
+
+#[fixture]
+fn workspace() -> Workspace {
+    let tmp = TempDir::new().unwrap();
+    let store = FolderSync::new(tmp.path().join("notes"), tmp.path().join("trash")).unwrap();
+    Workspace { _tmp: tmp, store }
+}
 
 fn id(name: &str) -> NoteId {
     NoteId::new(name).expect("valid note name")
@@ -208,53 +250,50 @@ fn renaming_an_entry_keeps_its_index() {
     assert_eq!(names(&order), ["a.md", "b.md", "c.md", "d-titled.md"]);
 }
 
-#[test]
-fn a_manifest_round_trips_through_disk() {
-    let tmp = TempDir::new().unwrap();
-    let store = OrderStore::new(tmp.path());
+#[rstest]
+fn a_manifest_round_trips_through_disk(manifest: Manifest) {
     let order = vec![id("b.md"), id("a.md")];
 
-    store.save(&order).unwrap();
+    manifest.store.save(&order).unwrap();
 
-    assert_eq!(store.load(), lines(&["b.md", "a.md"]));
+    assert_eq!(manifest.store.load(), lines(&["b.md", "a.md"]));
     assert_eq!(
-        fs::read_to_string(store.path()).unwrap(),
+        fs::read_to_string(manifest.store.path()).unwrap(),
         "b.md\na.md\n",
         "the manifest should stay greppable, one name per line"
     );
 }
 
-#[test]
-fn a_binary_manifest_reads_as_no_manifest_at_all() {
-    let tmp = TempDir::new().unwrap();
-    let store = OrderStore::new(tmp.path());
-    fs::write(store.path(), [0xff, 0xfe, 0x00, 0x9f]).unwrap();
+#[rstest]
+fn a_binary_manifest_reads_as_no_manifest_at_all(manifest: Manifest) {
+    fs::write(manifest.store.path(), [0xff, 0xfe, 0x00, 0x9f]).unwrap();
 
-    assert!(store.load().is_empty(), "invalid UTF-8 is a cache miss");
+    assert!(
+        manifest.store.load().is_empty(),
+        "invalid UTF-8 is a cache miss"
+    );
 }
 
-#[test]
-fn ten_thousand_blank_lines_are_harmless() {
-    let tmp = TempDir::new().unwrap();
-    let store = OrderStore::new(tmp.path());
-    fs::write(store.path(), "\n".repeat(10_000)).unwrap();
+#[rstest]
+fn ten_thousand_blank_lines_are_harmless(manifest: Manifest) {
+    fs::write(manifest.store.path(), "\n".repeat(10_000)).unwrap();
 
     let disk = [on_disk("a.md", 1)];
-    assert_eq!(names(&reconcile(&store.load(), &disk)), ["a.md"]);
+    assert_eq!(names(&reconcile(&manifest.store.load(), &disk)), ["a.md"]);
 }
 
-#[test]
-fn a_missing_manifest_is_not_an_error() {
-    let tmp = TempDir::new().unwrap();
-    let store = OrderStore::new(&tmp.path().join("never-created"));
+#[rstest]
+fn a_missing_manifest_is_not_an_error(manifest: Manifest) {
+    // Deliberately not the fixture's own store: this one is pointed at a directory that was
+    // never created, which is why the fixture exposes its root.
+    let store = OrderStore::new(&manifest.root.join("never-created"));
 
     assert!(store.load().is_empty());
 }
 
-#[test]
-fn renaming_a_note_moves_its_manifest_entry_in_place() {
-    let tmp = TempDir::new().unwrap();
-    let store = FolderSync::new(tmp.path().join("notes"), tmp.path().join("trash")).unwrap();
+#[rstest]
+fn renaming_a_note_moves_its_manifest_entry_in_place(workspace: Workspace) {
+    let store = &workspace.store;
     fs::write(store.workspace().join("2026-08-15-1548.md"), "body").unwrap();
     store
         .order()
@@ -271,10 +310,9 @@ fn renaming_a_note_moves_its_manifest_entry_in_place() {
     );
 }
 
-#[test]
-fn deleting_a_note_drops_its_manifest_entry() {
-    let tmp = TempDir::new().unwrap();
-    let store = FolderSync::new(tmp.path().join("notes"), tmp.path().join("trash")).unwrap();
+#[rstest]
+fn deleting_a_note_drops_its_manifest_entry(workspace: Workspace) {
+    let store = &workspace.store;
     fs::write(store.workspace().join("gone.md"), "body").unwrap();
     store
         .order()
@@ -289,16 +327,18 @@ fn deleting_a_note_drops_its_manifest_entry() {
 /// A manifest write that reached the watcher would re-list, which would rewrite the
 /// manifest, which would wake the watcher again. The app directory is excluded for exactly
 /// this reason, and it is worth an explicit test because the failure mode is a spin.
-#[test]
-fn writing_the_manifest_produces_no_events() {
-    let tmp = TempDir::new().unwrap();
-    let mut store = FolderSync::new(tmp.path().join("notes"), tmp.path().join("trash")).unwrap();
-    let events = store.subscribe();
-    store.start_watching().unwrap();
+#[rstest]
+fn writing_the_manifest_produces_no_events(mut workspace: Workspace) {
+    let events = workspace.store.subscribe();
+    workspace.store.start_watching().unwrap();
     collect(&events);
 
     for _ in 0..5 {
-        store.order().save(&[id("a.md"), id("b.md")]).unwrap();
+        workspace
+            .store
+            .order()
+            .save(&[id("a.md"), id("b.md")])
+            .unwrap();
     }
 
     expect_silence(&events, "writing the order manifest");
