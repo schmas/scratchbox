@@ -59,22 +59,73 @@ jobs:
       - name: Build test binaries once
         run: cargo build --tests -p scratchbox-core -p scratchbox-tui
 
+      # `scratchbox=debug`, not `trace`. Synchronous log writes on the watcher's translator
+      # thread advance the clock while a suppression entry's deadline does not, and slack
+      # between the TTL and the debounce window is only 1.5s. At `trace` — a line per raw
+      # event, contended by sibling tests on a loaded runner — the instrumentation could evict
+      # an entry early and forward an event the app made itself, reding `expect_silence` with a
+      # message identical to the genuine race this job exists to catch. `Suppressor::sweep`
+      # logs every eviction at `warn` so a reader can tell the two apart.
+      #
+      # A distinct directory per repetition: one accumulating file is twenty runs concatenated
+      # with no run boundary, which is unreadable exactly when it is needed.
       - name: Run the watcher suite 20 times
+        id: watcher-loop
         run: |
-          for run in $(seq 1 20); do
+          for run in $(seq 1 19); do
             echo "::group::run $run"
-            cargo test -p scratchbox-core --test watcher || exit 1
+            RUST_LOG=scratchbox=debug \
+            SCRATCHBOX_LOG_DIR="${RUNNER_TEMP}/scratchbox-log/watcher/run-${run}" \
+              cargo test -p scratchbox-core --test watcher || exit 1
             echo "::endgroup::"
           done
+          # One repetition with diagnostics off. If a red only ever appears with logging on,
+          # the instrumentation is perturbing the timing it exists to record rather than
+          # recording a race, and this run is what tells those apart.
+          echo "::group::run 20 (diagnostics off)"
+          cargo test -p scratchbox-core --test watcher || exit 1
+          echo "::endgroup::"
+
+      # Gated on this loop's own outcome, not a bare `if: failure()`. Once any step fails
+      # `failure()` is true for every later step, so a bare condition would fire this upload
+      # after the *save-flow* loop failed — finding no watcher logs and, with
+      # `if-no-files-found: error`, reding the job a second time over a failure that was never
+      # its own.
+      - name: Upload watcher logs
+        if: failure() && steps.watcher-loop.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: watcher-log-${{ matrix.os }}
+          path: ${{ runner.temp }}/scratchbox-log/watcher
+          # `warn` is the default, which would report a green upload with no artifact — a
+          # loop that died before writing anything must be visible, not quietly successful.
+          if-no-files-found: error
 
       # The one Phase 7 test that drives a real watcher rather than synthetic events. It is
       # where suppression and autosave meet, so it belongs under the same repetition: a
       # single green run would hide a window that is one event too short.
       - name: Run the live-watcher save test 20 times
+        id: save-flow-loop
         run: |
-          for run in $(seq 1 20); do
+          for run in $(seq 1 19); do
             echo "::group::run $run"
-            cargo test -p scratchbox-tui --test save_flow \
-              repeated_saves_under_a_live_watcher || exit 1
+            RUST_LOG=scratchbox=debug \
+            SCRATCHBOX_LOG_DIR="${RUNNER_TEMP}/scratchbox-log/save-flow/run-${run}" \
+              cargo test -p scratchbox-tui --test save_flow \
+                repeated_saves_under_a_live_watcher || exit 1
             echo "::endgroup::"
           done
+          echo "::group::run 20 (diagnostics off)"
+          cargo test -p scratchbox-tui --test save_flow \
+            repeated_saves_under_a_live_watcher || exit 1
+          echo "::endgroup::"
+
+      # A distinct artifact name from the watcher upload. Sharing one would 409 on the second
+      # call and red the job over an upload collision rather than the test that failed.
+      - name: Upload live-watcher save logs
+        if: failure() && steps.save-flow-loop.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: save-flow-log-${{ matrix.os }}
+          path: ${{ runner.temp }}/scratchbox-log/save-flow
+          if-no-files-found: error

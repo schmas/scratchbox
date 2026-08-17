@@ -56,6 +56,19 @@ impl Sandbox {
         self.root.join("trash")
     }
 
+    /// What the child sees as `$XDG_DATA_HOME`.
+    pub fn data_home(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
+    /// Where the child would put diagnostics, whether or not it does.
+    ///
+    /// Derived here rather than asked of `Config`, so a test asserting the directory is
+    /// *absent* is not relying on the code under test to say where absent means.
+    pub fn log_dir(&self) -> PathBuf {
+        self.data_home().join("scratchbox").join("log")
+    }
+
     pub fn note(&self, name: &str, body: &str) {
         fs::write(self.workspace().join(name), body).unwrap();
     }
@@ -70,16 +83,32 @@ impl Sandbox {
 
     /// Run the CLI with `input` piped in. Stdin is a pipe, never a terminal.
     pub fn run(&self, args: &[&str], input: &[u8]) -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_scratchbox"))
+        self.run_with_env(args, input, &[])
+    }
+
+    /// [`Sandbox::run`] with `extra` added to the child's environment.
+    ///
+    /// Separate so a test can set `RUST_LOG` for one child alone. `RUST_LOG` and
+    /// `SCRATCHBOX_LOG_DIR` are cleared first, and that is not tidiness: a child inherits the
+    /// environment of whoever ran `cargo test`, so a developer with `export RUST_LOG=info` in
+    /// their profile would otherwise change what these tests observe — including the ones
+    /// asserting that no log directory exists.
+    pub fn run_with_env(&self, args: &[&str], input: &[u8], extra: &[(&str, &str)]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_scratchbox"));
+        command
             .args(args)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env("XDG_DATA_HOME", self.root.join("data"))
+            .env("XDG_DATA_HOME", self.data_home())
+            .env_remove("RUST_LOG")
+            .env_remove("SCRATCHBOX_LOG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        for (key, value) in extra {
+            command.env(key, value);
+        }
 
+        let mut child = command.spawn().unwrap();
         child.stdin.take().unwrap().write_all(input).unwrap();
         child.wait_with_output().unwrap()
     }

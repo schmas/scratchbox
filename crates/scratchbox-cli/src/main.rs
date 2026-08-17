@@ -30,6 +30,10 @@ Appends stdin to the active note — the one at the top of the list — and exit
 /// Exit code for being used wrongly, as distinct from failing.
 const EXIT_USAGE: u8 = 2;
 
+/// One file per binary, so two processes writing at once never share a handle. Millisecond
+/// timestamps are what let a `scratchbox` line be placed against a `scratchbox-tui` one.
+const LOG_FILE: &str = "scratchbox.log";
+
 enum Command {
     Append {
         workspace: Option<PathBuf>,
@@ -199,9 +203,39 @@ fn open(workspace: Option<PathBuf>) -> Result<(FolderSync, OrderStore)> {
         .ensure_dirs()
         .context("could not open the workspace")?;
 
+    start_diagnostics(&config);
+
     let store = FolderSync::new(config.workspace.clone(), config.trash.clone())
         .context("could not open the workspace")?;
     Ok((store, OrderStore::new(&config.app_dir())))
+}
+
+/// Start file diagnostics if `RUST_LOG` asks for them, and never mind if that fails.
+///
+/// **Nothing here may return an error.** `append` reads stdin to EOF at its `read_stdin` call
+/// before it ever gets here, so a `?` on this path would mean `echo 'a thought' | scratchbox`
+/// draining the pipe, exiting non-zero, and writing nothing — straight into the failure
+/// `active_note` calls out below: *a hotkey that reports "no notes" instead of capturing the
+/// thought has failed at the only job it has*. An unparseable `RUST_LOG`, an unwritable data
+/// home, and a log directory inside the workspace all cost diagnostics and nothing else.
+///
+/// No appender, so no rotation: the file truncates once it passes
+/// `scratchbox_log::MAX_BYTES`. This binary writes a handful of lines per invocation.
+fn start_diagnostics(config: &Config) {
+    let Some(filter) = scratchbox_log::filter() else {
+        return;
+    };
+    let dir = config.log_dir();
+
+    // A log line written inside the watched tree wakes a running TUI's watcher, which is the
+    // one process that would notice. Refusing is the honest answer; see `scratchbox_log`.
+    if scratchbox_log::overlaps(&dir, &config.workspace) {
+        return;
+    }
+
+    if let Ok(writer) = scratchbox_log::open_log_file(&dir, LOG_FILE) {
+        scratchbox_log::subscribe(filter, writer);
+    }
 }
 
 fn load_config(workspace: Option<PathBuf>) -> Result<Config> {

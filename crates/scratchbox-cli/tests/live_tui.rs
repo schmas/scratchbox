@@ -27,6 +27,12 @@ fn open_tui(
     App,
     crossbeam_channel::Receiver<scratchbox_core::StoreEvent>,
 ) {
+    // By this file's own header this is where the plan expects the most likely real-world data
+    // loss — the CLI appending while the editor holds unsaved work — so it is the last suite
+    // that should be silent when it reds. The child `scratchbox` process installs its own
+    // subscriber from the same `$RUST_LOG`; this covers the in-process half.
+    scratchbox_log::init_for_tests();
+
     let store = FolderSync::new(sandbox.workspace(), sandbox.trash()).unwrap();
     let events = store.subscribe();
 

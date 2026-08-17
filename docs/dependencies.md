@@ -20,19 +20,75 @@ code that already works and is tested is not a real problem.
 
 ## In use
 
-| Crate | Where | Why |
-| --- | --- | --- |
-| `anyhow` | both binaries | Error context chaining at the top level, where the only consumer is a human reading stderr. |
-| `thiserror` | `scratchbox-core` | Typed errors across a library boundary, so the TUI can distinguish a conflict from an I/O failure. |
-| `serde` + `toml` | `scratchbox-core` | Config parsing. TOML only — there is one config file and it is hand-edited. |
-| `crossbeam-channel` | core, TUI | Watcher events crossing into the event loop; also what `notify-debouncer-full` speaks. |
-| `jiff` | `scratchbox-core` | Timestamps for note names. Chosen over `chrono` and `time`. |
-| `std::sync::LazyLock` | `scratchbox-tui` | Syntax set and theme, initialised once on first render. Standard library — no `lazy_static`, no `once_cell`. |
+**Scope** answers "does this reach a user's machine?". `ships` is a normal dependency of at
+least one binary; `dev-only` is a `[dev-dependencies]` entry, absent from
+`cargo tree -e normal` for both binaries and from the shipped artifacts.
+
+| Crate | Where | Scope | Why |
+| --- | --- | --- | --- |
+| `anyhow` | both binaries | ships | Error context chaining at the top level, where the only consumer is a human reading stderr. |
+| `thiserror` | `scratchbox-core` | ships | Typed errors across a library boundary, so the TUI can distinguish a conflict from an I/O failure. |
+| `serde` + `toml` | `scratchbox-core` | ships | Config parsing. TOML only — there is one config file and it is hand-edited. |
+| `crossbeam-channel` | core, TUI | ships | Watcher events crossing into the event loop; also what `notify-debouncer-full` speaks. |
+| `jiff` | `scratchbox-core` | ships | Timestamps for note names. Chosen over `chrono` and `time`. |
+| `std::sync::LazyLock` | `scratchbox-tui` | ships | Syntax set and theme, initialised once on first render. Standard library — no `lazy_static`, no `once_cell`. |
+| `tracing` | `scratchbox-core`, `scratchbox-tui` | ships | The facade, `default-features = false`. See *File-only diagnostics* below. |
+| `tracing-subscriber` | `scratchbox-log` | ships | The subscriber, `features = ["fmt", "env-filter"]`. |
+| `tracing-appender` | `scratchbox-tui` | ships | Daily rotation for the one process that stays open for hours. Deliberately not in `scratchbox`. |
+
+### File-only diagnostics
+
+The filesystem watcher is the acknowledged risky part of the design — CI runs the watcher
+suite 20 times per OS because an intermittent pass there is a race, not a flake — and
+diagnosing one used to mean reasoning about interleaving with no record of it. `eprintln!`
+cannot help: the TUI owns the terminal and `scratchbox` must stay silent on a hotkey. So there
+is a structured log to a file, off unless `RUST_LOG` names a `scratchbox` target.
+
+`scratchbox-log` exists as its own crate because both binaries need the subscriber, the core
+must not have one, and the TUI cannot be a dependency of the CLI without dragging ratatui into
+a hotkey-fired binary. It is the one place the "a file, never a standard stream" rule lives.
+
+Load-bearing choices, recorded because each one looks like an incidental detail:
+
+- **The log lives at `<data_home>/scratchbox/log/`, outside the workspace.** A log line
+  describing a filesystem event, written inside the watched tree, produces that same event one
+  debounce window later, which is logged, forever. `scratchbox_log::overlaps` refuses to
+  install anything when the two overlap, in both directions and with both sides resolved
+  through symlinks, for the same reason `Config::trash_overlaps_workspace` does.
+- **File appender only, and `ansi` is not enabled.** Omitting the feature means `nu-ansi-term`
+  is never linked, which is a stronger guarantee than remembering `.with_ansi(false)`.
+- **`parse_lossy` and `from_env_lossy` are banned.** Both `eprintln!` their complaint, which
+  would break the rule from inside the crate meant to hold it. `filter()` returns `Option` and
+  swallows a parse failure.
+- **No `max_level_*` or `release_max_level_*` feature.** A directive above `STATIC_MAX_LEVEL`
+  makes `EnvFilter` print a multi-line warning to stderr, which has no `MakeWriter` and so
+  cannot be redirected into the file.
+- **`tracing` is taken `default-features = false`.** The default set includes `attributes`,
+  which would add `tracing-attributes` — a proc-macro crate — to the build graph of
+  `scratchbox-core`, the crate both binaries depend on. `span!`/`event!` cost a few more lines
+  than `#[instrument]` and keep it out; verified absent from the workspace's normal graph.
+  Note the narrower claim: `syn`/`quote`/`proc-macro2` are *already* in core's graph through
+  `serde_derive` and `thiserror-impl`, so what this avoids is a third proc-macro crate's
+  compile, not the subtree itself.
+- **`tracing-appender` is a dependency of `scratchbox-tui` alone.** It requires `time`
+  non-optionally, plus `symlink` for a `latest` link nothing here asks for. A cargo feature on
+  `scratchbox-log` could not have achieved the split — features unify across two normal
+  dependents in one workspace build, so `scratchbox` would have linked the appender anyway.
+  Verified: `cargo tree -e normal -p scratchbox-cli` contains none of `tracing-appender`,
+  `time`, or `symlink`. In the TUI, `time` was already arriving through `ratatui-widgets` and
+  `syntect`→`plist`, so the appender adds only `symlink` there that is genuinely new — the
+  rejection of `time` below is about writing against its API, not about the lockfile.
+- **Diagnostics can never fail the operation they observe.** `scratchbox` reads stdin to EOF
+  before it opens the workspace, so an error propagated out of setup would drain the pipe and
+  drop the captured thought. Nothing on that path returns a `Result` a caller must handle, and
+  `RollingFileAppender::builder().build()` is used instead of `rolling::daily`, which *panics*
+  on a directory failure.
+- **The file is bounded.** The TUI rotates daily and keeps 7; `scratchbox` truncates once the
+  file passes `scratchbox_log::MAX_BYTES`.
 
 ## Worth adopting
 
-These are tracked as issues rather than applied directly, because each one is a change to
-how the project is tested or diagnosed and deserves review on its own.
+Tracked as issues rather than applied directly, because each one deserves review on its own.
 
 ### `proptest` — property tests for the pure logic
 
@@ -44,19 +100,6 @@ Invariants worth stating as properties: a slug never exceeds `MAX_SLUG_LEN`; a n
 survives `slugged_name` reports `is_slugged`; `reconcile` returns exactly the set of notes
 on disk with no duplicates and no invented entries, whatever the manifest contains,
 including `../../.ssh/id_rsa`, absolute paths, and NUL bytes.
-
-### `tracing` + `tracing-subscriber` + `tracing-appender` — file-only diagnostics
-
-The filesystem watcher is the acknowledged risky part of the design — CI runs the watcher
-suite 20 times per OS because an intermittent pass there is a race, not a flake. Diagnosing
-one currently means reasoning about interleaving without a record of it.
-
-`eprintln!` cannot help: the TUI owns the terminal, and `scratchbox` must stay silent on a
-hotkey. A structured log to a file, off unless `RUST_LOG` says otherwise, gives watcher and
-suppression events a timeline — and gives a CI failure an artifact to upload.
-
-Constraint: file appender only. Nothing in this project may write diagnostics to stdout or
-stderr during normal operation.
 
 ### `rstest` — parameterized cases for table-shaped tests
 

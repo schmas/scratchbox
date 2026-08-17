@@ -1,0 +1,18 @@
+[package]
+name = "scratchbox-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "File-only diagnostics for scratchbox: the activation gate, the writer, and the subscriber."
+
+
+# tracing-subscriber and nothing else. This crate must not grow a dependency on
+# `scratchbox-core` (the core takes the `tracing` facade, not a subscriber) nor on
+# `tracing-appender` (see D7: it drags `time` and `symlink` into whatever links it, and
+# `scratchbox` is fired from a global hotkey).
+[dependencies]
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

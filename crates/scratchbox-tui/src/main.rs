@@ -12,7 +12,7 @@ use scratchbox_core::{Config, FolderSync, Store};
 use scratchbox_tui::app::App;
 use scratchbox_tui::event::{AppEvent, Events};
 use scratchbox_tui::keys::Action;
-use scratchbox_tui::{keys, ui};
+use scratchbox_tui::{diagnostics, keys, ui};
 
 struct Options {
     workspace: Option<PathBuf>,
@@ -66,6 +66,14 @@ fn run(options: Options) -> Result<()> {
     config
         .ensure_dirs()
         .context("could not open the workspace")?;
+
+    // Before the store, so the watcher and the suppressor have somewhere to report from.
+    //
+    // Bound to a name and held for the whole of `run`: dropping the guard flushes the
+    // appender's worker, and a `let _ =` would drop it here and lose every line. Deliberately
+    // no `?` — there is no error to propagate. Diagnostics that could fail startup would be a
+    // feature that breaks the app it exists to observe.
+    let _diagnostics = diagnostics::start(&config);
 
     let store = FolderSync::new(config.workspace.clone(), config.trash.clone())
         .context("could not open the workspace")?;

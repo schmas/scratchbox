@@ -37,6 +37,12 @@ cargo test -p scratchbox-tui --test save_flow repeated_saves_under_a_live_watche
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 
+# Diagnostics: off unless RUST_LOG names a `scratchbox` target. Written to
+# <data_home>/scratchbox/log/, never to stdout or stderr.
+RUST_LOG=scratchbox=debug cargo run -p scratchbox-tui
+SCRATCHBOX_LOG_DIR=/tmp/sbx-log RUST_LOG=scratchbox=debug \
+  cargo test -p scratchbox-core --test watcher   # test binaries log here
+
 # edtui/ratatui compatibility spike (CI risk gate)
 cargo run -p scratchbox-tui --example spike_editor
 ```
@@ -47,6 +53,7 @@ cargo run -p scratchbox-tui --example spike_editor
 .
 ├── crates/
 │   ├── scratchbox-core/   # headless: config, note, store, order, watcher, foldersync — no terminal/widget types
+│   ├── scratchbox-log/    # file-only diagnostics: activation gate, writer, subscriber — never a standard stream
 │   ├── scratchbox-cli/    # `scratchbox` bin: append stdin to active note
 │   └── scratchbox-tui/    # `scratchbox-tui` bin: editor pane + note list
 └── docs/
@@ -56,7 +63,8 @@ cargo run -p scratchbox-tui --example spike_editor
 
 ## Conventions
 
-- `scratchbox-core` stays headless — no ratatui/crossterm types leak into it; TUI and CLI both depend on it.
+- `scratchbox-core` stays headless — no ratatui/crossterm types leak into it; TUI and CLI both depend on it. It takes the `tracing` facade only: a library that installed a subscriber would decide for both binaries where diagnostics go.
+- Diagnostics are file-only and off unless `RUST_LOG` names a `scratchbox` target. Nothing in this project writes a diagnostic to stdout or stderr — the TUI owns the terminal and `scratchbox` runs from a hotkey. `eprintln!` is reserved for fatal errors and config warnings, which are user-facing messaging rather than diagnostics.
 - The trash directory lives outside the workspace on purpose (deleted notes may hold secrets; must never sync to a cloud-synced workspace).
 - Filesystem-watcher tests are inherently racy across inotify/FSEvents; CI runs the watcher suite and the live-watcher save test 20x per OS rather than once.
 

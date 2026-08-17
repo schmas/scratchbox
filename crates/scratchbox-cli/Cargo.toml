@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 scratchbox-core.workspace = true
+# The subscriber, and deliberately not `tracing-appender`: this binary is fired from a global
+# hotkey, and the appender would drag `time` — rejected by name in `docs/dependencies.md` —
+# and `symlink` into its graph. It writes through a plain 0600 file that truncates past a cap.
+scratchbox-log.workspace = true
 
 anyhow.workspace = true
 

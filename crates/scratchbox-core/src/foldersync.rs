@@ -233,6 +233,18 @@ impl Store for FolderSync {
     fn write(&self, id: &NoteId, content: &str) -> Result<()> {
         let target = self.resolve(id)?;
 
+        // `?`, never `%`. `tracing-subscriber` ANSI-escapes exactly one field — "message" —
+        // and writes every other with a bare `{:?}`. A `%` field becomes a `DisplayValue`
+        // whose `Debug` delegates to `Display`, and `NoteId`'s `Display` is `write_str`, so
+        // the name would reach the file byte for byte. `NoteId::new` rejects NUL, separators,
+        // and a leading dot; it does *not* reject `\n` or `\x1b`. A note arriving by folder
+        // sync named "a\n2026-…INFO…forwarded event=Removed(x.md).md" would otherwise forge
+        // a whole log line, and an OSC/CSI sequence would execute in the terminal of whoever
+        // reads the file or opens the CI artifact. `str`'s `Debug` escapes both.
+        //
+        // The byte count, never the content: a scratchpad's text does not belong in a log.
+        tracing::debug!(id = ?id.as_str(), bytes = content.len(), "write");
+
         // Announced before the write rather than after: the watcher can deliver the event
         // before the write has even returned, and an unannounced echo reloads the note
         // over whatever the user has typed since.
@@ -256,7 +268,12 @@ impl Store for FolderSync {
             // `create_new` both tests and claims the name, so two notes made in the same
             // minute cannot race through a look-then-create gap onto one file.
             match atomic::create_new(&path) {
-                Ok(_) => return Ok(id),
+                Ok(_) => {
+                    // `landed`, because the name that lands can differ from the base: two
+                    // notes made in the same minute collide and the second gets a suffix.
+                    tracing::debug!(landed = ?id.as_str(), attempt, "create");
+                    return Ok(id);
+                }
                 Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(source) => return Err(Error::io("create", &path)(source)),
             }
@@ -278,6 +295,15 @@ impl Store for FolderSync {
         let id = NoteId::new(&name)?;
         let target = self.workspace.join(&name);
 
+        // `landed` separately from `to`: renaming is collision-aware, so a caller tracking
+        // notes by name needs to see which of the two the disk actually got.
+        tracing::debug!(
+            from = ?from.as_str(),
+            to = ?to.as_str(),
+            landed = ?id.as_str(),
+            "rename"
+        );
+
         // The name that will actually land, so the echo is recognized whichever half of
         // the rename the platform reports.
         self.suppressor.register_rename(from, &id);
@@ -294,7 +320,12 @@ impl Store for FolderSync {
     fn delete(&self, id: &NoteId) -> Result<()> {
         let source = self.resolve(id)?;
         let name = Self::free_name(&self.trash, id.as_str())?;
-        let target = self.trash.join(name);
+        let target = self.trash.join(&name);
+
+        // `landed` is the name inside the trash, which is suffixed when two same-named notes
+        // are deleted into one trash directory. The trash path itself is not logged: it is
+        // configurable and may name a directory the user would rather not see recorded.
+        tracing::debug!(id = ?id.as_str(), landed = ?name, "delete");
 
         // Same reasoning as in `rename`: reconciliation prunes an entry whose file is
         // gone, so a failed manifest update cannot lose anything.
