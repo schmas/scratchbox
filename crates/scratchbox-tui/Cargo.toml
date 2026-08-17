@@ -6,6 +6,18 @@ license.workspace = true
 repository.workspace = true
 description = "Terminal UI for scratchbox."
 
+# `bench = false` so `cargo bench` selects the criterion target and not this crate's unit tests.
+# `--benches` alone is not enough: cargo builds the library and binaries *as benchmarks* too, and
+# those use the libtest harness, whose `getopts` exits non-zero on any criterion flag passed
+# after `--` before a single bench runs.
+[lib]
+bench = false
+
+[[bin]]
+name = "scratchbox-tui"
+path = "src/main.rs"
+bench = false
+
 [dependencies]
 scratchbox-core.workspace = true
 scratchbox-log.workspace = true
@@ -25,4 +37,11 @@ tracing-appender.workspace = true
 two-face.workspace = true
 
 [dev-dependencies]
+# The syntax-set load and the per-frame highlighter cost.
+criterion.workspace = true
 tempfile.workspace = true
+
+# See `crates/scratchbox-core/Cargo.toml` for why `harness = false`.
+[[bench]]
+name = "syntax"
+harness = false

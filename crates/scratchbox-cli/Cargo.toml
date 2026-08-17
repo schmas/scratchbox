@@ -9,6 +9,8 @@ description = "Append stdin to the active scratchbox note without opening the TU
 [[bin]]
 name = "scratchbox"
 path = "src/main.rs"
+# See the note in `crates/scratchbox-core/Cargo.toml`.
+bench = false
 
 [dependencies]
 scratchbox-core.workspace = true

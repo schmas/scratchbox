@@ -40,6 +40,13 @@ proptest = { version = "1.11.0", default-features = false, features = [
 # `default-features = false` drops `async-timeout` and with it 16 transitive crates including
 # `futures-timer` and `futures-util`. There is no async anywhere in this project.
 rstest = { version = "0.26.1", default-features = false }
+# `default-features = false` drops `rayon` and `plotters`, which costs the HTML report and saves
+# 8 transitive crates. The numbers and the confidence intervals are what this project wants; a
+# plotted report of them is not. The heaviest addition in this batch even so — and unlike the
+# other two dev-dependencies, `cargo clippy --all-targets` does compile and lint bench targets.
+criterion = { version = "0.8.2", default-features = false, features = [
+  "cargo_bench_support",
+] }
 
 # Diagnostics. `default-features = false` on both is load-bearing, not tidiness:
 #

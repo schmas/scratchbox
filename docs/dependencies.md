@@ -37,6 +37,7 @@ least one binary; `dev-only` is a `[dev-dependencies]` entry, absent from
 | `tracing-appender` | `scratchbox-tui` | ships | Daily rotation for the one process that stays open for hours. Deliberately not in `scratchbox`. |
 | `proptest` | `scratchbox-core` | dev-only | Properties for `naming` and `order::reconcile`. See *Property tests* below. |
 | `rstest` | `scratchbox-core` | dev-only | Labelled `#[case]` rows and tempdir fixtures. See *Parameterized cases* below. |
+| `criterion` | core, TUI | dev-only | The startup budget, measured rather than estimated. See *Benchmarks* below. |
 
 ### File-only diagnostics
 
@@ -143,17 +144,42 @@ their own — and both expose their temp root, because tests assert against it.
 `tests/foldersync.rs` and `tests/watcher.rs` have two tempdir sites and one, below the threshold
 where a fixture pays for the indirection, and are deliberately left inline.
 
+### Benchmarks
+
+The startup budget used to be asserted in source comments. `benches/core.rs` and
+`benches/syntax.rs` measure it instead. Measured on an Apple M1 Pro, macOS 26.5.2, release
+profile — the profile a user runs, which is why a debug figure would not answer the question:
+
+| Bench | Measured | Note |
+| --- | --- | --- |
+| `syntax_set_load` | **0.79 ms** | The comment in `syntax.rs` said "about 3ms". It was an estimate, and about four times too pessimistic; it now carries this figure. |
+| `highlighter_per_frame` | **8.0 µs** | Per repaint, `LazyLock` warm. Beyond issue #17's list, added because `highlighter()` is called from `ui::render` once per frame and does real work — two `Arc` clones, a scan of 220 syntaxes, and a whole `Theme` clone. |
+| `reconcile` 10 / 100 / 1000 | 1.7 µs / 19 µs / 515 µs | The O(manifest × disk) shape as a measurement: throughput falls from 5.9 to 1.9 Melem/s across the range. Fine at ten notes, which is the realistic case. |
+| `slug_from_first_line` | 188 ns | Runs on every save that is still unslugged. |
+| `folder_sync_list` 10 / 100 / 1000 | 40 µs / 233 µs / 1.85 ms | Roughly linear; syscall-bound. |
+
+Benching full TUI startup is out of scope — a terminal-owning event loop is not a criterion
+harness, and `scratchbox-tui --bench-first-frame` stays exactly as it is for that.
+
+Two things to know before touching them:
+
+- **"CI time is unchanged" is only half true.** `cargo test --workspace` is genuinely unchanged:
+  `harness = false` keeps bench targets out of the test path, verified — `cargo test` neither
+  compiles nor runs one. But `cargo clippy --workspace --all-targets` *does* compile and lint
+  them, so the clippy job's cold build grows by criterion's tree and bench code is held to the
+  same `-D warnings` bar as everything else. `Swatinem/rust-cache` absorbs the warm case.
+- **`cargo bench` needs `bench = false` on the lib and bin targets, which they now have.**
+  `--benches` alone is *not* enough, contrary to what looks obvious: cargo builds the library
+  and binaries as benchmarks too, those use the libtest harness, and libtest's `getopts` exits
+  non-zero on any criterion flag after `--`. `cargo bench --workspace --benches -- --quick`
+  exited 101 until the flags were added; it exits 0 now.
+
+Baselines live under `target/criterion`, already covered by `/target` in `.gitignore`, so they
+are local. Do not write a check that compares against a stored baseline in CI.
+
 ## Worth adopting
 
-Tracked as issues rather than applied directly, because each one deserves review on its own.
-
-### `criterion` — statistics behind the startup budget
-
-The budget is already asserted in comments — a 100ms startup target, ~3ms to load the
-syntax set — and `scratchbox-tui --bench-first-frame` exists to measure it by hand.
-Criterion turns that into a repeatable measurement with confidence intervals over
-`reconcile` at realistic note counts, syntax-set load, and slug derivation. Dev-dependency
-only; nothing ships.
+Tracked as an issue rather than applied directly, because it deserves review on its own.
 
 ### `clap` — once the CLI grows a second verb
 
