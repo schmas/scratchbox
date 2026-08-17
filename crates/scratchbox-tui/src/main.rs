@@ -11,7 +11,7 @@ use scratchbox_core::{Config, FolderSync, Store};
 
 use scratchbox_tui::app::App;
 use scratchbox_tui::event::{AppEvent, Events};
-use scratchbox_tui::keys::Action;
+use scratchbox_tui::keys::{Action, Command};
 use scratchbox_tui::{diagnostics, keys, ui};
 
 struct Options {
@@ -191,26 +191,30 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> scratchbox_core
         return match keys::map_conflict(key) {
             Action::KeepMine => app.keep_mine(),
             Action::TakeTheirs => app.take_theirs(),
-            Action::Quit => app.quit(),
+            Action::Do(Command::Quit) => app.quit(),
             _ => Ok(()),
         };
     }
 
     match keys::map(key, app.focus()) {
-        Action::Quit => app.quit(),
-        Action::NewNote => app.create_note(),
-        Action::RequestDelete => {
-            app.request_delete();
-            Ok(())
-        }
-        Action::MoveNoteUp => app.move_selection_up(),
-        Action::MoveNoteDown => app.move_selection_down(),
-        Action::SelectPrevious => app.select_previous(),
-        Action::SelectNext => app.select_next(),
-        Action::ToggleFocus => {
-            app.toggle_focus();
-            Ok(())
-        }
+        Action::Do(command) => match command {
+            Command::Quit => app.quit(),
+            Command::NewNote => app.create_note(),
+            Command::RequestDelete => {
+                app.request_delete();
+                Ok(())
+            }
+            Command::MoveNoteUp => app.move_selection_up(),
+            Command::MoveNoteDown => app.move_selection_down(),
+            Command::SelectPrevious => app.select_previous(),
+            Command::SelectNext => app.select_next(),
+            Command::ToggleFocus => {
+                app.toggle_focus();
+                Ok(())
+            }
+            // No chord produces this yet: the panel it would open does not exist.
+            Command::OpenHelp => Ok(()),
+        },
         Action::Edit(key) => {
             app.edit(key);
             Ok(())

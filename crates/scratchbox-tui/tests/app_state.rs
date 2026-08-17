@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use scratchbox_core::order::OrderStore;
 use scratchbox_core::{APP_SUBDIR, FolderSync, NoteId, StoreEvent};
 use scratchbox_tui::app::{App, Focus};
-use scratchbox_tui::keys::{self, Action};
+use scratchbox_tui::keys::{self, Action, Command};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -315,18 +315,21 @@ fn app_shortcuts_are_recognized_in_both_panes() {
     let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
 
     for focus in [Focus::List, Focus::Editor] {
-        assert_eq!(keys::map(ctrl('q'), focus), Action::Quit);
+        assert_eq!(keys::map(ctrl('q'), focus), Action::Do(Command::Quit));
         // Raw mode delivers Ctrl-C as a key, so it leaves through the same door.
-        assert_eq!(keys::map(ctrl('c'), focus), Action::Quit);
-        assert_eq!(keys::map(ctrl('n'), focus), Action::NewNote);
-        assert_eq!(keys::map(ctrl('d'), focus), Action::RequestDelete);
+        assert_eq!(keys::map(ctrl('c'), focus), Action::Do(Command::Quit));
+        assert_eq!(keys::map(ctrl('n'), focus), Action::Do(Command::NewNote));
+        assert_eq!(
+            keys::map(ctrl('d'), focus),
+            Action::Do(Command::RequestDelete)
+        );
         assert_eq!(
             keys::map(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), focus),
-            Action::ToggleFocus
+            Action::Do(Command::ToggleFocus)
         );
         assert_eq!(
             keys::map(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT), focus),
-            Action::MoveNoteUp
+            Action::Do(Command::MoveNoteUp)
         );
     }
 }
@@ -336,7 +339,10 @@ fn app_shortcuts_are_recognized_in_both_panes() {
 fn arrows_move_the_selection_in_the_list_and_the_cursor_in_the_editor() {
     let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
 
-    assert_eq!(keys::map(up, Focus::List), Action::SelectPrevious);
+    assert_eq!(
+        keys::map(up, Focus::List),
+        Action::Do(Command::SelectPrevious)
+    );
     assert_eq!(keys::map(up, Focus::Editor), Action::Edit(up));
 }
 

@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use scratchbox_core::{Format, WorkspaceHealth};
 
 use crate::app::{App, Conflict, Focus};
+use crate::keys::{self, Chord, Command};
 use crate::syntax;
 
 /// Wide enough for a timestamped name plus its format tag, narrow enough to leave the
@@ -106,14 +107,76 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         (None, WorkspaceHealth::Ok) => (
             match app.status() {
                 Some(status) => status.to_owned(),
-                None => {
-                    "^N new   ^D delete   alt-↑/↓ reorder   tab switch pane   ^Q quit".to_owned()
-                }
+                None => status_hints(),
             },
             Color::DarkGray,
         ),
     };
     frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)), area);
+}
+
+/// One status-line hint: a command, or two commands that share a label.
+enum Hint {
+    One(Command, &'static str),
+    /// Printed with the shared caption prefix once — `alt-↑/↓`, not `alt-↑ alt-↓`.
+    Pair(Command, Command, &'static str),
+}
+
+/// What the status line advertises, in the order it prints.
+///
+/// Not every binding: the plain arrows are left out, because a line this narrow is better
+/// spent on the keys a user cannot guess.
+const HINTS: &[Hint] = &[
+    Hint::One(Command::NewNote, "new"),
+    Hint::One(Command::RequestDelete, "delete"),
+    Hint::Pair(Command::MoveNoteUp, Command::MoveNoteDown, "reorder"),
+    Hint::One(Command::ToggleFocus, "switch pane"),
+    Hint::One(Command::Quit, "quit"),
+];
+
+/// The default status line's key hints, taken from the keymap.
+///
+/// Deliberately not the panel's prose. This line abbreviates (`new`, not `new note`), merges
+/// the two reorder bindings into one hint, prints only the first chord of a binding that has
+/// two, and omits the plain arrows — four transforms, past the point where one string can
+/// serve both widths. The keys and the commands still come from the table, so a rebind moves
+/// this line with it.
+fn status_hints() -> String {
+    HINTS
+        .iter()
+        .filter_map(hint_text)
+        .collect::<Vec<_>>()
+        .join("   ")
+}
+
+fn hint_text(hint: &Hint) -> Option<String> {
+    match hint {
+        Hint::One(command, label) => Some(format!("{} {label}", hint_key(*command)?)),
+        Hint::Pair(first, second, label) => {
+            let keys = merge_captions(&hint_key(*first)?, &hint_key(*second)?);
+            Some(format!("{keys} {label}"))
+        }
+    }
+}
+
+/// How the first chord of `command`'s binding is printed.
+///
+/// `None` for a command the keymap declares no chord for, which cannot be advertised as a
+/// key. The test asserting this line byte for byte is what keeps that from passing quietly.
+fn hint_key(command: Command) -> Option<String> {
+    keys::binding(command)?.chords.first().map(Chord::caption)
+}
+
+/// `alt-↑` and `alt-↓` as `alt-↑/↓`: the shared prefix printed once, because two full
+/// captions side by side read as two unrelated keys rather than one pair.
+fn merge_captions(first: &str, second: &str) -> String {
+    let shared: usize = first
+        .chars()
+        .zip(second.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    format!("{first}/{}", &second[shared..])
 }
 
 fn render_delete_prompt(frame: &mut Frame, app: &App, area: Rect) {
