@@ -26,6 +26,17 @@ const MANIFEST_FILE: &str = "order";
 /// be resolved against anything.
 ///
 /// New files go on top, newest first. Everything the manifest knows about keeps its place.
+///
+/// `disk` is expected to hold each id at most once, which is what a directory listing gives.
+/// A repeated id is returned repeatedly rather than merged — this function reorders what it is
+/// given, it does not deduplicate it.
+///
+/// **A note whose name carries leading or trailing whitespace is not matched by its own
+/// manifest line**: the line is trimmed here and the name is not. Such a note is read as new on
+/// every call, so it loses its position, cannot be reordered, and makes this function
+/// non-idempotent on its first application. See issue #19, which also covers a second ordering
+/// defect: a repaired id is pushed at the *stale* line's position, so it can overtake a later
+/// line that names it directly.
 pub fn reconcile(manifest: &[String], disk: &[NoteMeta]) -> Vec<NoteId> {
     let mut unclaimed: Vec<&NoteMeta> = disk.iter().collect();
     let mut remembered = Vec::new();
@@ -38,6 +49,12 @@ pub fn reconcile(manifest: &[String], disk: &[NoteMeta]) -> Vec<NoteId> {
             continue;
         };
         // A duplicated line names one note; the first occurrence is where it sits.
+        //
+        // `seen` is not what prevents a duplicate in the *output* — `unclaimed.remove` below is.
+        // Removing this guard reds no property: a repeated line finds nothing left in
+        // `unclaimed` and falls through to `renamed_to`, which returns `None` or claims a
+        // different id. It skips redundant work on a repeated line and guards a future
+        // refactor; it is not load-bearing today, and it is worth knowing which of the two is.
         if !seen.insert(id.clone()) {
             continue;
         }

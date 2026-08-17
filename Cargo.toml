@@ -30,6 +30,14 @@ thiserror = "2.0.20"
 walkdir = "2.5.0"
 tempfile = "3.27.0"
 
+# Dropping `fork` and `timeout` removes 10 transitive crates. They exist to survive a test
+# that hangs or aborts the process; the functions under property test here are pure and
+# allocation-only. Panics are still caught and shrunk in-process.
+proptest = { version = "1.11.0", default-features = false, features = [
+  "std",
+  "bit-set",
+] }
+
 # Diagnostics. `default-features = false` on both is load-bearing, not tidiness:
 #
 #   * `tracing`'s defaults include `attributes`, which pulls tracing-attributes and with it

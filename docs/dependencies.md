@@ -35,6 +35,7 @@ least one binary; `dev-only` is a `[dev-dependencies]` entry, absent from
 | `tracing` | `scratchbox-core`, `scratchbox-tui` | ships | The facade, `default-features = false`. See *File-only diagnostics* below. |
 | `tracing-subscriber` | `scratchbox-log` | ships | The subscriber, `features = ["fmt", "env-filter"]`. |
 | `tracing-appender` | `scratchbox-tui` | ships | Daily rotation for the one process that stays open for hours. Deliberately not in `scratchbox`. |
+| `proptest` | `scratchbox-core` | dev-only | Properties for `naming` and `order::reconcile`. See *Property tests* below. |
 
 ### File-only diagnostics
 
@@ -86,20 +87,39 @@ Load-bearing choices, recorded because each one looks like an incidental detail:
 - **The file is bounded.** The TUI rotates daily and keeps 7; `scratchbox` truncates once the
   file passes `scratchbox_log::MAX_BYTES`.
 
+### Property tests
+
+`naming` and `order::reconcile` are pure, allocation-only, and have sharp invariants, and
+`reconcile` parses an untrusted file — its doc claims no hostile manifest line can reach a path
+*even in principle*, which is a claim about all inputs. Thirteen properties state those
+invariants in `tests/naming_properties.rs` and `tests/order_properties.rs`.
+
+`default-features = false` drops `fork` and `timeout` and with them 10 transitive crates. Those
+features exist to survive a test that hangs or aborts the process; nothing under test here
+touches the filesystem.
+
+Two things worth knowing before changing them:
+
+- **Every property is covered by a break that reds it.** A property no break can falsify is one
+  nobody has shown to be sensitive. Two breaks are recorded as *not* falsifying anything, so
+  they are not worth retrying: removing the `seen` guard in `reconcile` (the output duplicate is
+  prevented by `unclaimed.remove`, not by `seen`), and dropping `unclaimed.remove` (which reds
+  no-duplicates rather than set equality — the output holds the note twice, but as a *set* it
+  still equals the disk).
+- **Two properties are deliberately narrower than they look.** Order preservation and
+  idempotence exclude names carrying surrounding whitespace and manifests that reach the
+  rename-repair branch, because `reconcile` is genuinely wrong there — issue #19, reproduced,
+  ordering-only, and pre-existing. The narrowing is commented at each property with the issue
+  number rather than quietly applied, and the generators still produce whitespace so nothing is
+  hidden.
+
+Regression seeds land in `crates/scratchbox-core/tests/<name>.proptest-regressions` — sibling
+files, not a directory — and are not gitignored, so a genuine counterexample is committed and
+replayed before any novel case.
+
 ## Worth adopting
 
 Tracked as issues rather than applied directly, because each one deserves review on its own.
-
-### `proptest` — property tests for the pure logic
-
-`naming` and `order::reconcile` are pure functions with sharp invariants, and `reconcile`
-parses an untrusted file. Example-based tests cover the cases someone thought of; the
-interesting failures here are the ones nobody thought of.
-
-Invariants worth stating as properties: a slug never exceeds `MAX_SLUG_LEN`; a name that
-survives `slugged_name` reports `is_slugged`; `reconcile` returns exactly the set of notes
-on disk with no duplicates and no invented entries, whatever the manifest contains,
-including `../../.ssh/id_rsa`, absolute paths, and NUL bytes.
 
 ### `rstest` — parameterized cases for table-shaped tests
 
