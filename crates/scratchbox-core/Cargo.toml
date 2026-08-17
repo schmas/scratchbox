@@ -6,6 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "Headless core for scratchbox: config, notes, storage, watcher."
 
+# `bench = false` so `cargo bench` selects the criterion target and not this crate's unit tests.
+# `--benches` alone is not enough: cargo builds the library and binaries *as benchmarks* too, and
+# those use the libtest harness, whose `getopts` exits non-zero on any criterion flag passed
+# after `--` before a single bench runs.
+[lib]
+bench = false
+
 [dependencies]
 crossbeam-channel.workspace = true
 directories.workspace = true
@@ -21,6 +28,8 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Turns the startup numbers asserted in source comments into measurements.
+criterion.workspace = true
 # Properties for `naming` and `order::reconcile`, which are pure and parse untrusted input.
 proptest.workspace = true
 # Labelled cases for the input/expected tables, and a fixture for the tempdir setup that was
@@ -30,3 +39,10 @@ rstest.workspace = true
 # record nothing on the CI runner where its race actually shows up.
 scratchbox-log.workspace = true
 tempfile.workspace = true
+
+# `harness = false` is what keeps this out of the `cargo test` path: verified that
+# `cargo test --workspace` neither compiles nor runs it. `cargo clippy --all-targets` does lint
+# it, which is deliberate — bench code is held to the same `-D warnings` bar as everything else.
+[[bench]]
+name = "core"
+harness = false

@@ -25,8 +25,15 @@ pub const THEME_NAME: &str = "solarized-dark";
 /// bat's syntax set rather than syntect's defaults.
 ///
 /// syntect's bundled 75 syntaxes cover seven of the eight declared formats and miss
-/// TypeScript outright. two-face ships bat's 220, which has it. Costs about 3ms to load
-/// against a 100ms startup budget, and only when a note is first rendered.
+/// TypeScript outright. two-face ships bat's 220, which has it.
+///
+/// Measured at **0.79ms** to load against a 100ms startup budget, and only when a note is first
+/// rendered — `benches/syntax.rs`, release, Apple M1 Pro. This comment previously said "about
+/// 3ms", which was an estimate rather than a measurement and was roughly four times too
+/// pessimistic. The number is worth having right in both directions: it is what the budget is
+/// spent against.
+///
+/// Note that the *load* is not the cost a repaint pays. See [`highlighter`].
 static SYNTAXES: LazyLock<Arc<SyntaxSet>> =
     LazyLock::new(|| Arc::new(two_face::syntax::extra_newlines()));
 
@@ -45,6 +52,12 @@ static THEME: LazyLock<Theme> = LazyLock::new(|| {
 /// Never fails. An extension the syntax set does not know falls back to plain text, which
 /// renders every line in the base style — the same thing highlighting-off would do, and a
 /// far better answer than refusing to show the note.
+///
+/// **Called once per frame, from `ui::render`, and it is not free.** Every call clones the
+/// `Arc`, scans 220 syntaxes' extension lists, clones the matched `SyntaxReference`, and clones
+/// a whole `Theme` and `ThemeSet`. Measured at **8.0µs** per call with the `LazyLock` warm —
+/// `benches/syntax.rs`, release, Apple M1 Pro. Comfortable against a repaint, and worth knowing
+/// before anything makes this loop harder.
 pub fn highlighter(format: Format) -> SyntaxHighlighter {
     let syntaxes = SYNTAXES.clone();
     let syntax = syntaxes

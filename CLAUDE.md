@@ -34,8 +34,14 @@ cargo test -p scratchbox-core --test watcher
 cargo test -p scratchbox-tui --test save_flow repeated_saves_under_a_live_watcher
 
 # Lint / format (CI-enforced, -D warnings)
+# Note: --all-targets lints the criterion benches too, so bench code is held to the same bar.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+
+# Benchmarks (criterion, dev-only). `--benches` is not optional shorthand — without it cargo
+# also selects lib and bin targets, whose libtest harness rejects any criterion flag after `--`.
+cargo bench --workspace --benches
+cargo bench --workspace --benches -- --quick     # one fast pass, no full statistics
 
 # Diagnostics: off unless RUST_LOG names a `scratchbox` target. Written to
 # <data_home>/scratchbox/log/, never to stdout or stderr.
