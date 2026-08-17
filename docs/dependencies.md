@@ -72,14 +72,39 @@ Criterion turns that into a repeatable measurement with confidence intervals ove
 `reconcile` at realistic note counts, syntax-set load, and slug derivation. Dev-dependency
 only; nothing ships.
 
+### `clap` — once the CLI grows a second verb
+
+Both binaries hand-roll argument parsing, about 40 lines each. That is correct today and
+covered by tests, so there is nothing to fix yet. What makes it worth replacing is not the
+parsing but the *rules between* flags.
+
+`scratchbox-cli` already has one: `--yes` is meaningless without `--purge-trash`, rejected
+by hand. Issue #8 adds `--new` and `--overwrite-current`, which are mutually exclusive with
+each other and with the default append. That turns one hand-written conflict rule into
+several, spread across a `while let` loop — which is where hand-rolled parsing starts
+quietly accepting nonsense combinations. `conflicts_with` and `ArgGroup` state those rules
+once, declaratively, and `--help` stays correct for free.
+
+Startup cost was the original objection and it does not hold up. Measured on macOS, 300
+warm execs of a stripped release binary taking the same flags:
+
+| | hand-rolled | `clap` derive |
+| --- | --- | --- |
+| mean per-exec | 1.05 ms | 0.98 ms |
+| stripped size | 342 KB | 729 KB |
+| cold build | 1.2 s | 5.5 s |
+
+Latency is identical — argument parsing is argv iteration either way, and the difference
+disappears into process spawn. The real costs are 388 KB of binary, which is page-cache
+resident for something fired repeatedly from a hotkey, and proc-macro build time.
+
+Do it with #8, not before: today's four stable flags genuinely do not need it, and adopting
+it alongside the new verbs means the conflict rules are declarative from the start rather
+than hand-written and then migrated.
+
 ## Deliberately not used
 
 ### Rejected on merit
-
-**`clap`.** Argument parsing is roughly 40 lines per binary, correct, and covered by tests.
-`scratchbox` is fork-exec'd from a keypress, so its startup is user-visible latency, and it
-takes four flags that have not changed. Revisit if the flag surface grows enough that
-hand-rolled parsing starts dropping cases — not before.
 
 **`itertools`.** Would tighten perhaps three loops. Not a dependency's worth of value.
 
