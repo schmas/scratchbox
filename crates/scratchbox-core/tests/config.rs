@@ -2,14 +2,44 @@
 //!
 //! These build [`Dirs`] explicitly instead of setting `$XDG_*`, because environment
 //! variables are process-global and these tests run on parallel threads. The env-reading
-//! path is covered separately through [`Dirs::resolve`], which is pure.
+//! path is covered separately through [`Dirs::resolve`], which is pure. The fixture below
+//! preserves that: it creates a directory, not an environment variable.
 
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rstest::{fixture, rstest};
 use scratchbox_core::{APP_SUBDIR, Config, Dirs};
 use tempfile::TempDir;
+
+/// A config root and the [`Dirs`] resolved against it.
+///
+/// The `TempDir` is held here rather than handed back separately: dropped early it takes the
+/// directory with it, and every path in `Dirs` would then point at nothing.
+///
+/// `root` is public to the tests because two of them assert against it —
+/// `missing_config_file_yields_defaults` expects `<root>/data/scratchbox/notes`, and
+/// `default_trash_stays_outside_an_overridden_workspace` builds `<root>/Google Drive/notes`. A
+/// fixture that hid the root could not serve either, which is the same reason
+/// `crates/scratchbox-cli/tests/support/mod.rs` exposes its own.
+struct Sandbox {
+    _tmp: TempDir,
+    root: PathBuf,
+    dirs: Dirs,
+}
+
+#[fixture]
+fn sandbox() -> Sandbox {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let dirs = dirs_in(&root);
+    Sandbox {
+        _tmp: tmp,
+        root,
+        dirs,
+    }
+}
 
 fn dirs_in(root: &Path) -> Dirs {
     Dirs {
@@ -25,51 +55,43 @@ fn write_config(dirs: &Dirs, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
-#[test]
-fn missing_config_file_yields_defaults() {
-    let tmp = TempDir::new().unwrap();
-    let dirs = dirs_in(tmp.path());
+#[rstest]
+fn missing_config_file_yields_defaults(sandbox: Sandbox) {
+    let config = Config::load_with(&sandbox.dirs, None).unwrap();
 
-    let config = Config::load_with(&dirs, None).unwrap();
-
-    assert_eq!(config.workspace, tmp.path().join("data/scratchbox/notes"));
-    assert_eq!(config.trash, tmp.path().join("data/scratchbox/trash"));
+    assert_eq!(config.workspace, sandbox.root.join("data/scratchbox/notes"));
+    assert_eq!(config.trash, sandbox.root.join("data/scratchbox/trash"));
     assert!(config.warnings.is_empty());
 }
 
-#[test]
-fn workspace_key_is_honored() {
-    let tmp = TempDir::new().unwrap();
-    let dirs = dirs_in(tmp.path());
-    write_config(&dirs, "workspace = \"/somewhere/notes\"\n");
+#[rstest]
+fn workspace_key_is_honored(sandbox: Sandbox) {
+    write_config(&sandbox.dirs, "workspace = \"/somewhere/notes\"\n");
 
-    let config = Config::load_with(&dirs, None).unwrap();
+    let config = Config::load_with(&sandbox.dirs, None).unwrap();
 
     assert_eq!(config.workspace, PathBuf::from("/somewhere/notes"));
 }
 
-#[test]
-fn cli_override_beats_the_config_key() {
-    let tmp = TempDir::new().unwrap();
-    let dirs = dirs_in(tmp.path());
-    write_config(&dirs, "workspace = \"/from/config\"\n");
+#[rstest]
+fn cli_override_beats_the_config_key(sandbox: Sandbox) {
+    write_config(&sandbox.dirs, "workspace = \"/from/config\"\n");
 
-    let config = Config::load_with(&dirs, Some(PathBuf::from("/from/cli"))).unwrap();
+    let config = Config::load_with(&sandbox.dirs, Some(PathBuf::from("/from/cli"))).unwrap();
 
     assert_eq!(config.workspace, PathBuf::from("/from/cli"));
 }
 
-#[test]
-fn tilde_in_config_paths_expands_to_home() {
-    let tmp = TempDir::new().unwrap();
-    let dirs = dirs_in(tmp.path());
-    write_config(&dirs, "workspace = \"~/notes\"\n");
+#[rstest]
+fn tilde_in_config_paths_expands_to_home(sandbox: Sandbox) {
+    write_config(&sandbox.dirs, "workspace = \"~/notes\"\n");
 
-    let config = Config::load_with(&dirs, None).unwrap();
+    let config = Config::load_with(&sandbox.dirs, None).unwrap();
 
-    assert_eq!(config.workspace, dirs.home.join("notes"));
+    assert_eq!(config.workspace, sandbox.dirs.home.join("notes"));
 }
 
+/// No tempdir and no config file, so it takes no fixture: `Dirs::resolve` is pure.
 #[test]
 fn xdg_config_home_is_honored_when_absolute() {
     let dirs = Dirs::resolve(
@@ -86,30 +108,32 @@ fn xdg_config_home_is_honored_when_absolute() {
     );
 }
 
-#[test]
-fn xdg_falls_back_to_dot_config_when_unset_or_relative() {
+/// Two rows rather than two halves of one body, so a failure names which value was ignored
+/// wrongly. Takes no fixture for the same reason as the test above.
+#[rstest]
+#[case::unset(None, None)]
+// The XDG spec says a relative value must be ignored rather than joined, and an empty value is
+// relative.
+#[case::relative_and_empty(Some("relative/config"), Some(""))]
+fn xdg_falls_back_to_dot_config_when_unset_or_relative(
+    #[case] config_home: Option<&str>,
+    #[case] data_home: Option<&str>,
+) {
     let home = PathBuf::from("/home/someone");
 
-    let unset = Dirs::resolve(None, None, home.clone());
-    assert_eq!(unset.config_home, home.join(".config"));
-    assert_eq!(unset.data_home, home.join(".local").join("share"));
-
-    // The XDG spec says a relative value must be ignored, not joined.
-    let relative = Dirs::resolve(
-        Some(OsString::from("relative/config")),
-        Some(OsString::from("")),
+    let dirs = Dirs::resolve(
+        config_home.map(OsString::from),
+        data_home.map(OsString::from),
         home.clone(),
     );
-    assert_eq!(relative.config_home, home.join(".config"));
-    assert_eq!(relative.data_home, home.join(".local").join("share"));
+
+    assert_eq!(dirs.config_home, home.join(".config"));
+    assert_eq!(dirs.data_home, home.join(".local").join("share"));
 }
 
-#[test]
-fn ensure_dirs_creates_workspace_app_dir_and_trash() {
-    let tmp = TempDir::new().unwrap();
-    let dirs = dirs_in(tmp.path());
-
-    let config = Config::load_with(&dirs, None).unwrap();
+#[rstest]
+fn ensure_dirs_creates_workspace_app_dir_and_trash(sandbox: Sandbox) {
+    let config = Config::load_with(&sandbox.dirs, None).unwrap();
     config.ensure_dirs().unwrap();
 
     assert!(config.workspace.is_dir());
@@ -117,14 +141,12 @@ fn ensure_dirs_creates_workspace_app_dir_and_trash() {
     assert!(config.trash.is_dir());
 }
 
-#[test]
-fn default_trash_stays_outside_an_overridden_workspace() {
-    let tmp = TempDir::new().unwrap();
-    let dirs = dirs_in(tmp.path());
+#[rstest]
+fn default_trash_stays_outside_an_overridden_workspace(sandbox: Sandbox) {
     // The dangerous case D11 was revised for: a workspace inside a synced cloud folder.
-    let cloud = tmp.path().join("Google Drive/notes");
+    let cloud = sandbox.root.join("Google Drive/notes");
 
-    let config = Config::load_with(&dirs, Some(cloud.clone())).unwrap();
+    let config = Config::load_with(&sandbox.dirs, Some(cloud.clone())).unwrap();
 
     assert_eq!(config.workspace, cloud);
     assert!(
@@ -135,13 +157,14 @@ fn default_trash_stays_outside_an_overridden_workspace() {
     assert!(config.warnings.is_empty());
 }
 
-#[test]
-fn trash_configured_inside_the_workspace_warns() {
-    let tmp = TempDir::new().unwrap();
-    let dirs = dirs_in(tmp.path());
-    write_config(&dirs, "workspace = \"/notes\"\ntrash = \"/notes/.trash\"\n");
+#[rstest]
+fn trash_configured_inside_the_workspace_warns(sandbox: Sandbox) {
+    write_config(
+        &sandbox.dirs,
+        "workspace = \"/notes\"\ntrash = \"/notes/.trash\"\n",
+    );
 
-    let config = Config::load_with(&dirs, None).unwrap();
+    let config = Config::load_with(&sandbox.dirs, None).unwrap();
 
     assert_eq!(config.warnings.len(), 1);
     assert!(

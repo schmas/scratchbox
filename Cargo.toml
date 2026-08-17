@@ -37,6 +37,9 @@ proptest = { version = "1.11.0", default-features = false, features = [
   "std",
   "bit-set",
 ] }
+# `default-features = false` drops `async-timeout` and with it 16 transitive crates including
+# `futures-timer` and `futures-util`. There is no async anywhere in this project.
+rstest = { version = "0.26.1", default-features = false }
 
 # Diagnostics. `default-features = false` on both is load-bearing, not tidiness:
 #
