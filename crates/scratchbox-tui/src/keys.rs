@@ -99,6 +99,29 @@ pub enum Section {
     General,
 }
 
+impl Section {
+    /// The panel's heading for this section.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Section::Notes => "Notes",
+            Section::Navigation => "Navigation",
+            Section::Panes => "Panes",
+            Section::General => "General",
+        }
+    }
+}
+
+/// The order the panel lists the derived sections in.
+///
+/// Not the table's declaration order: that one is grouped for reading the keymap, this one
+/// leads with what a user came to look up.
+const SECTION_ORDER: &[Section] = &[
+    Section::Notes,
+    Section::Navigation,
+    Section::Panes,
+    Section::General,
+];
+
 /// An app-level command: exactly the set [`BINDINGS`] declares.
 ///
 /// Separate from [`Action`] so the table's completeness test is a `match` the compiler
@@ -113,8 +136,7 @@ pub enum Command {
     SelectPrevious,
     SelectNext,
     ToggleFocus,
-    /// Show the keybindings panel. No chord produces it yet — the panel it opens does not
-    /// exist, and claiming a key for a no-op would take a working editor key away for nothing.
+    /// Show the keybindings panel.
     OpenHelp,
 }
 
@@ -221,6 +243,18 @@ pub static BINDINGS: &[Binding] = &[
         ctx: Ctx::Global,
         command: Command::Quit,
     },
+    Binding {
+        // `^H` is reachable from the editor, which `?` would not be, and it takes nothing the
+        // user cannot do another way: it shadows edtui's delete-character-backward, which is
+        // what Backspace already does. `F1` is the alias rather than the primary because
+        // macOS needs `fn` held with it unless the standard-function-keys setting is on.
+        chords: &[Chord::ctrl(KeyCode::Char('h')), Chord::plain(KeyCode::F(1))],
+        caption: "^H/F1",
+        desc: "show this list of keybindings",
+        section: Section::General,
+        ctx: Ctx::Global,
+        command: Command::OpenHelp,
+    },
 ];
 
 /// The binding that declares `command`.
@@ -271,6 +305,251 @@ pub fn map_conflict(key: KeyEvent) -> Action {
         (KeyCode::Char('t') | KeyCode::Char('T'), false) => Action::TakeTheirs,
         _ => Action::Ignore,
     }
+}
+
+/// What a key means while the keybindings panel is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpKey {
+    Close,
+    Up,
+    Down,
+    Top,
+    Bottom,
+    /// Perform the selected binding.
+    Run,
+    /// Start filtering the list.
+    Search,
+    /// A character for the filter.
+    Type(char),
+    Backspace,
+    /// Leave the filter prompt, keeping the query.
+    SearchCommit,
+    /// Leave the filter prompt and clear the query.
+    SearchCancel,
+    Quit,
+    Ignore,
+}
+
+/// What a key means while the keybindings panel is open.
+///
+/// Hardcoded like the other two prompt keymaps, and for the same reason: its rules include
+/// catch-alls rather than an enumerable set of chords.
+///
+/// Quit stays live, exactly as it does while an external change is unresolved: a user must
+/// never be trapped inside a modal.
+///
+/// `searching` decides whether a printable key moves the cursor or goes into the filter, so it
+/// is examined before anything else.
+pub fn map_help(key: KeyEvent, searching: bool) -> HelpKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    if searching {
+        let ctrl_or_alt = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        return match key.code {
+            // Quit survives even in here. Inside the prompt `q` is a character, so this is
+            // the only way out that is not one of the two below.
+            KeyCode::Char('q' | 'c') if ctrl => HelpKey::Quit,
+            KeyCode::Esc => HelpKey::SearchCancel,
+            KeyCode::Enter => HelpKey::SearchCommit,
+            KeyCode::Backspace => HelpKey::Backspace,
+            // SHIFT is not rejected: crossterm sets it for every uppercase character, and
+            // rejecting it would make the filter lowercase-only.
+            KeyCode::Char(c) if !ctrl_or_alt => HelpKey::Type(c),
+            _ => HelpKey::Ignore,
+        };
+    }
+
+    match (key.code, ctrl) {
+        (KeyCode::Char('q') | KeyCode::Char('c'), true) => HelpKey::Quit,
+        (KeyCode::Esc, _) => HelpKey::Close,
+        (KeyCode::Up | KeyCode::Char('k'), false) => HelpKey::Up,
+        (KeyCode::Down | KeyCode::Char('j'), false) => HelpKey::Down,
+        (KeyCode::Home, false) => HelpKey::Top,
+        (KeyCode::End, false) => HelpKey::Bottom,
+        (KeyCode::Char('/'), false) => HelpKey::Search,
+        (KeyCode::Enter, false) => HelpKey::Run,
+        // Everything else is swallowed rather than passed on, as the two prompts do: the
+        // panel covers the panes, and a key that reached the buffer from behind it would
+        // arrive somewhere the user cannot see.
+        _ => HelpKey::Ignore,
+    }
+}
+
+/// One row the panel lists.
+///
+/// `run` is what `⏎` performs, which is deliberately not the binding the row displays. It is
+/// `None` for three different reasons:
+///   - a literal row has no single command behind it at all;
+///   - opening the panel from an already-open panel is a no-op;
+///   - quitting would exit the app from a panel opened to read, and `^Q` still works as a
+///     keypress.
+///
+/// Rows that cannot be run are dimmed, so `⏎` doing nothing reads as an answer rather than a
+/// bug.
+#[derive(Clone, Copy)]
+pub struct HelpRow {
+    pub caption: &'static str,
+    pub desc: &'static str,
+    pub run: Option<Command>,
+}
+
+impl HelpRow {
+    fn from_binding(binding: &'static Binding) -> Self {
+        Self {
+            caption: binding.caption,
+            desc: binding.desc,
+            run: match binding.command {
+                Command::Quit | Command::OpenHelp => None,
+                command => Some(command),
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct HelpSection {
+    pub title: &'static str,
+    pub rows: Vec<HelpRow>,
+}
+
+/// Every section the panel lists: the ones derived from the table, then the ones written out
+/// for the keymaps that cannot be.
+pub fn help_sections() -> Vec<HelpSection> {
+    let mut sections: Vec<HelpSection> = SECTION_ORDER
+        .iter()
+        .map(|section| HelpSection {
+            title: section.title(),
+            rows: BINDINGS
+                .iter()
+                .filter(|binding| binding.section == *section)
+                .map(HelpRow::from_binding)
+                .collect(),
+        })
+        .collect();
+    sections.extend(literal_sections());
+    sections
+}
+
+/// The keymaps that are not tabled, transcribed from the code that decides them.
+///
+/// Their rule is a catch-all — "anything else cancels" — rather than a set of chords, so there
+/// is nothing to walk. Every caption below is fed through the function it describes by a test,
+/// and checked against the prose the prompt itself prints, so the two cannot drift apart
+/// without something going red.
+fn literal_sections() -> Vec<HelpSection> {
+    let row = |caption, desc| HelpRow {
+        caption,
+        desc,
+        run: None,
+    };
+
+    vec![
+        HelpSection {
+            title: "Delete prompt",
+            rows: vec![
+                row("y/⏎", "confirm the delete"),
+                row("any other key", "cancel the delete"),
+            ],
+        },
+        HelpSection {
+            title: "External change",
+            rows: vec![
+                row("k", "keep mine — write my buffer over theirs"),
+                row("t", "take theirs — discard my edits"),
+                row("^Q", "quit without saving"),
+            ],
+        },
+        HelpSection {
+            title: "This panel",
+            rows: vec![
+                row("esc", "close this panel"),
+                row("↑/↓", "select a binding"),
+                row("⏎", "run the selected binding"),
+                row("/", "search this list"),
+            ],
+        },
+        HelpSection {
+            title: "Editor",
+            rows: vec![
+                row(
+                    "",
+                    "the editor is emacs-style and modeless — there is no mode to leave",
+                ),
+                row(
+                    "^N ^D ^H",
+                    "taken by scratchbox: edtui's own meanings do not apply to them",
+                ),
+            ],
+        },
+    ]
+}
+
+/// The rows matching `query`, case-insensitively over caption and description.
+///
+/// Sections left with nothing disappear. An empty query is the identity, so the filtered walk
+/// is the only walk there is — the cursor, the panel, and `⏎` all index into this.
+pub fn filter(sections: &[HelpSection], query: &str) -> Vec<HelpSection> {
+    if query.is_empty() {
+        return sections.to_vec();
+    }
+    let needle = query.to_lowercase();
+
+    sections
+        .iter()
+        .filter_map(|section| {
+            let rows: Vec<HelpRow> = section
+                .rows
+                .iter()
+                .filter(|row| {
+                    contains_ignore_case(row.caption, &needle)
+                        || contains_ignore_case(row.desc, &needle)
+                })
+                .copied()
+                .collect();
+            if rows.is_empty() {
+                None
+            } else {
+                Some(HelpSection {
+                    title: section.title,
+                    rows,
+                })
+            }
+        })
+        .collect()
+}
+
+/// Substring search that folds ASCII case without allocating.
+///
+/// The haystacks are `&'static str` and there are twenty of them to scan on every keystroke,
+/// so lowercasing each one per key would allocate the whole table repeatedly. Only ASCII case
+/// is folded, which covers everything here: the captions and descriptions are ASCII apart
+/// from arrows, and an arrow has no case.
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// How many selectable rows the panel lists.
+pub fn help_row_count(sections: &[HelpSection]) -> usize {
+    sections.iter().map(|section| section.rows.len()).sum()
+}
+
+/// How many body lines those sections occupy: a heading per section, its rows, and a blank
+/// line between sections.
+///
+/// Lines and rows are different counts, and both are needed: the cursor addresses rows, the
+/// scrolling window addresses lines. Rendering lays the body out to this shape, and a test
+/// holds the two to the same number.
+pub fn help_line_count(sections: &[HelpSection]) -> usize {
+    help_row_count(sections) + sections.len() + sections.len().saturating_sub(1)
 }
 
 /// What a key means in normal mode: a scan over the one table that declares them.

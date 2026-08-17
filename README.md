@@ -46,6 +46,18 @@ If the editor happens to be open on the same note, its watcher picks the append 
 about a second. Unsaved edits are never overwritten: the editor shows
 `external change — [k]eep mine · [t]ake theirs` and waits for you to choose.
 
+## Keybindings
+
+Press `^H` (or `F1`) inside the editor for the full list. `/` searches it, `⏎` runs the
+selected binding, `esc` closes it. The list is generated from the app's own keymap rather than
+written out beside it, so it cannot fall behind the keys it describes — which is why there is no
+table of them here. The two prompts' keys are the exception, and a test keeps those honest.
+
+The editor pane is [edtui](https://github.com/preiter93/edtui) in **emacs mode**, and it is
+**modeless**: there is no normal/insert distinction to leave. `^N`, `^D`, and `^H` are taken by
+scratchbox and do not reach the editor; everything else does. Nothing is lost to `^H` — it
+would have been edtui's delete-character-backward, which is what `Backspace` already does.
+
 ## Paths
 
 XDG is honored on macOS too, following terminal-tool convention rather than

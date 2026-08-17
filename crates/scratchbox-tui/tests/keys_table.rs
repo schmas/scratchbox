@@ -63,6 +63,8 @@ fn declared() -> Vec<Pin> {
         // A widely-held pane-switching convention, declared as a second chord so it keeps
         // working now that modifiers are compared exactly.
         global("ctrl+tab", key(KeyCode::Tab, CTRL), Command::ToggleFocus),
+        global("ctrl+h", key(KeyCode::Char('h'), CTRL), Command::OpenHelp),
+        global("f1", key(KeyCode::F(1), NONE), Command::OpenHelp),
         // The plain arrows are the one focus-conditional pair: selection in the list, cursor
         // movement in the editor.
         Pin {
@@ -193,10 +195,8 @@ fn expected_rows(command: Command) -> usize {
         | Command::MoveNoteDown
         | Command::SelectPrevious
         | Command::SelectNext
-        | Command::ToggleFocus => 1,
-        // No chord opens the keybindings panel yet, because the panel does not exist. A key
-        // claimed now would take a working editor key away in exchange for a no-op.
-        Command::OpenHelp => 0,
+        | Command::ToggleFocus
+        | Command::OpenHelp => 1,
     }
 }
 
@@ -272,12 +272,12 @@ fn no_chord_is_claimed_twice() {
     }
 }
 
-/// The status line reads its keys from the table now, and says exactly what it said before.
+/// The status line reads its keys from the table, and prints exactly this.
 ///
 /// Asserted against the literal string rather than against the table, so a table change that
 /// alters what the user reads shows up here as a difference rather than agreeing with itself.
 #[test]
-fn the_default_status_line_is_unchanged() {
+fn the_default_status_line_prints_the_keys_it_should() {
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path().join("notes");
     let store = FolderSync::new(workspace.clone(), tmp.path().join("trash")).unwrap();
@@ -292,7 +292,7 @@ fn the_default_status_line_is_unchanged() {
 
     assert_eq!(
         row(terminal.backend().buffer(), 9).trim_end(),
-        "^N new   ^D delete   alt-↑/↓ reorder   tab switch pane   ^Q quit"
+        "^N new   ^D delete   alt-↑/↓ reorder   tab switch pane   ^H help   ^Q quit"
     );
 }
 

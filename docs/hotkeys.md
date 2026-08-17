@@ -1,5 +1,8 @@
 # Global hotkey setup
 
+This page is about launching scratchbox from your desktop environment. For the keys *inside*
+the app, press `^H` there — the app registers no global hotkey itself, for the reason below.
+
 Scratchbox registers no global hotkey of its own. The desktop environment owns the
 keyboard, so it is the desktop environment that binds the key — and on Wayland that is the
 only approach that works at all, since its security model forbids background applications

@@ -4,6 +4,7 @@ pub mod app;
 pub mod diagnostics;
 pub mod editor;
 pub mod event;
+pub mod input;
 pub mod keys;
 pub mod save;
 pub mod syntax;

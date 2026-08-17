@@ -11,8 +11,7 @@ use scratchbox_core::{Config, FolderSync, Store};
 
 use scratchbox_tui::app::App;
 use scratchbox_tui::event::{AppEvent, Events};
-use scratchbox_tui::keys::{Action, Command};
-use scratchbox_tui::{diagnostics, keys, ui};
+use scratchbox_tui::{diagnostics, input, ui};
 
 struct Options {
     workspace: Option<PathBuf>,
@@ -90,6 +89,12 @@ fn run(options: Options) -> Result<()> {
     }
 
     let mut terminal = init_terminal();
+    // Before the first draw, so anything that needs a window height has a real one rather
+    // than the assumed size. A terminal that will not report its size is not worth failing
+    // startup over — the assumption stands, and the first resize corrects it.
+    if let Ok(size) = terminal.size() {
+        app.set_size(size.width, size.height);
+    }
     // On screen first. Watching the workspace is what makes the app feel live, but it is
     // also the slowest thing at startup, and the notes are readable without it.
     terminal
@@ -150,9 +155,14 @@ fn event_loop(
 
         match event {
             AppEvent::Terminal(crossterm::event::Event::Key(key)) if key.is_press() => {
-                if let Err(error) = handle_key(app, key) {
+                if let Err(error) = input::handle_key(app, key) {
                     app_error(app, error);
                 }
+            }
+            // Kept rather than discarded: the keybindings panel scrolls, and a window height
+            // is the one thing a scroll handler cannot work out for itself.
+            AppEvent::Terminal(crossterm::event::Event::Resize(width, height)) => {
+                app.set_size(width, height);
             }
             AppEvent::Terminal(_) => {}
             AppEvent::Store(store_event) => {
@@ -170,60 +180,6 @@ fn event_loop(
         if app.should_quit() {
             return Ok(());
         }
-    }
-}
-
-fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> scratchbox_core::Result<()> {
-    if app.pending_delete().is_some() {
-        return match keys::map_confirmation(key) {
-            Action::ConfirmDelete => app.confirm_delete(),
-            _ => {
-                app.cancel_delete();
-                Ok(())
-            }
-        };
-    }
-
-    // An unresolved external change owns the keyboard until it is answered: every other
-    // path through the app either reloads the buffer or writes it, and both would decide
-    // for the user which version of the note survives.
-    if app.conflict().is_some() {
-        return match keys::map_conflict(key) {
-            Action::KeepMine => app.keep_mine(),
-            Action::TakeTheirs => app.take_theirs(),
-            Action::Do(Command::Quit) => app.quit(),
-            _ => Ok(()),
-        };
-    }
-
-    match keys::map(key, app.focus()) {
-        Action::Do(command) => match command {
-            Command::Quit => app.quit(),
-            Command::NewNote => app.create_note(),
-            Command::RequestDelete => {
-                app.request_delete();
-                Ok(())
-            }
-            Command::MoveNoteUp => app.move_selection_up(),
-            Command::MoveNoteDown => app.move_selection_down(),
-            Command::SelectPrevious => app.select_previous(),
-            Command::SelectNext => app.select_next(),
-            Command::ToggleFocus => {
-                app.toggle_focus();
-                Ok(())
-            }
-            // No chord produces this yet: the panel it would open does not exist.
-            Command::OpenHelp => Ok(()),
-        },
-        Action::Edit(key) => {
-            app.edit(key);
-            Ok(())
-        }
-        Action::ConfirmDelete
-        | Action::CancelDelete
-        | Action::KeepMine
-        | Action::TakeTheirs
-        | Action::Ignore => Ok(()),
     }
 }
 

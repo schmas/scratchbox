@@ -5,17 +5,43 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 
 use scratchbox_core::{Format, WorkspaceHealth};
 
-use crate::app::{App, Conflict, Focus};
-use crate::keys::{self, Chord, Command};
+use crate::app::{App, Conflict, Focus, Help};
+use crate::keys::{self, Chord, Command, HelpSection};
 use crate::syntax;
 
 /// Wide enough for a timestamped name plus its format tag, narrow enough to leave the
 /// editor the room that matters.
 const LIST_WIDTH: u16 = 34;
+
+/// The smallest body the keybindings panel will draw into.
+///
+/// Below this it would be all border and no list, so nothing is drawn at all. Public because
+/// the test that renders at the edge of it has to ask rather than restate — the two drifting
+/// apart is how a panel ends up drawn at a size it cannot fit.
+pub const HELP_MIN_BODY_W: u16 = 21;
+pub const HELP_MIN_BODY_H: u16 = 6;
+
+/// The panel's preferred floor, never applied past the frame's own width.
+const HELP_MIN_W: u16 = 30;
+/// A ceiling, so the list does not stretch into unreadable lines on a wide terminal.
+const HELP_MAX_W: u16 = 90;
+/// The share of the frame it prefers, so it reads as a panel over the panes.
+const HELP_PCT: u16 = 70;
+/// Columns left uncovered each side, so the panes stay visible around it.
+const HELP_MARGIN: u16 = 4;
+/// Between the left border and the caption column.
+const HELP_GUTTER: u16 = 3;
+/// Between the caption column and the descriptions.
+const HELP_KEY_GAP: u16 = 2;
+/// A blank column before the right border.
+const HELP_PAD_R: u16 = 1;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let [body, status] =
@@ -27,10 +53,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_editor(frame, app, editor);
     render_status(frame, app, status);
 
+    // One modal per frame, in the order that owns the keyboard. An `if / else if` rather than
+    // three `if`s: the last thing written to a cell wins, so two modals composed together
+    // would put the one that does *not* own the keyboard on top.
     if app.pending_delete().is_some() {
         render_delete_prompt(frame, app, body);
     } else if let Some(conflict) = app.conflict() {
         render_conflict_prompt(frame, app, conflict, body);
+    } else if let Some(help) = app.help() {
+        render_help(frame, help, &keys::help_sections(), body);
     }
 }
 
@@ -94,6 +125,10 @@ fn render_editor(frame: &mut Frame, app: &mut App, area: Rect) {
 /// A conflict outranks everything: it is a question, and the app is not accepting anything
 /// else until it is answered. An unavailable workspace outranks the ordinary status because
 /// it changes what every subsequent keystroke means.
+///
+/// The keybindings panel's hints come last of all, below both. This is the one line that
+/// carries a refused quit and the in-memory-only warning, and a panel that replaced it would
+/// hide the message a user needs before pressing quit a second time.
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
     let (text, color) = match (app.conflict(), app.health()) {
         (Some(_), _) => (
@@ -105,14 +140,34 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             Color::Yellow,
         ),
         (None, WorkspaceHealth::Ok) => (
-            match app.status() {
-                Some(status) => status.to_owned(),
-                None => status_hints(),
+            match (app.status(), app.help()) {
+                (Some(status), _) => status.to_owned(),
+                (None, Some(help)) if help.searching() => filter_prompt(help.query()),
+                (None, Some(_)) => help_hints(),
+                (None, None) => status_hints(),
             },
             Color::DarkGray,
         ),
     };
     frame.render_widget(Paragraph::new(text).style(Style::new().fg(color)), area);
+}
+
+/// What the status line says while the panel is open.
+///
+/// Led by the way out, because this line truncates from the right and being unable to leave a
+/// modal is the worst thing it could fail to say. `^Q` comes from the keymap; the panel's own
+/// four keys are the ones its `This panel` section lists.
+fn help_hints() -> String {
+    let quit = hint_key(Command::Quit).unwrap_or_default();
+    format!("esc close   ↑/↓ select   ⏎ run   / search   {quit} quit")
+}
+
+/// The status line while the filter prompt is up.
+///
+/// No quit hint: inside the prompt `q` is a character. The ways out are the two named here,
+/// plus `^Q`, which stays live everywhere.
+fn filter_prompt(query: &str) -> String {
+    format!("Filter: {query}▊   ⏎ done   esc clear")
 }
 
 /// One status-line hint: a command, or two commands that share a label.
@@ -131,6 +186,7 @@ const HINTS: &[Hint] = &[
     Hint::One(Command::RequestDelete, "delete"),
     Hint::Pair(Command::MoveNoteUp, Command::MoveNoteDown, "reorder"),
     Hint::One(Command::ToggleFocus, "switch pane"),
+    Hint::One(Command::OpenHelp, "help"),
     Hint::One(Command::Quit, "quit"),
 ];
 
@@ -251,6 +307,291 @@ fn render_conflict_prompt(frame: &mut Frame, app: &App, conflict: Conflict, area
     let area = centered(area, 62, 8);
     frame.render_widget(Clear, area);
     frame.render_widget(prompt, area);
+}
+
+/// The keybindings panel: a floating box over both panes.
+///
+/// Takes the panel's state and its rows rather than the whole app, which is what makes it
+/// obvious that nothing here writes any of it: `render` holds a `&mut App` for the editor
+/// widget, so a `&App` parameter would prove nothing.
+fn render_help(frame: &mut Frame, help: &Help, sections: &[HelpSection], area: Rect) {
+    // First, and in the same rect the formulas below use: a panel drawn into a body this
+    // small would be border with nothing inside it.
+    if area.width < HELP_MIN_BODY_W || area.height < HELP_MIN_BODY_H {
+        return;
+    }
+
+    // Measured from the whole list, always. A box that resized on every keystroke while the
+    // user typed a filter would be unreadable — so the geometry comes from `sections` and only
+    // the contents come from the filtered set below.
+    let (caption_w, content_w) = help_metrics(sections);
+    let rect = help_rect(content_w, line_count(sections), area);
+
+    let shown = keys::filter(sections, help.query());
+    let rows = keys::help_row_count(&shown);
+
+    let inner_w = rect.width.saturating_sub(2);
+    let visible = usize::from(rect.height.saturating_sub(2));
+    let lines = if shown.is_empty() {
+        vec![no_match_line(help.query(), caption_w, inner_w)]
+    } else {
+        help_body(&shown, caption_w, inner_w)
+    };
+
+    let offset = help_scroll_to(&lines, help.cursor(), help.offset(), visible);
+    // Required, not defensive: the box is sized from the whole list, so a filtered body can
+    // be far shorter than the window it is drawn into, and slicing past the end would panic
+    // inside the draw closure — taking the process, and the unsaved buffer, with it.
+    let end = (offset + visible).min(lines.len());
+
+    let selected = lines
+        .get(offset..end)
+        .unwrap_or_default()
+        .iter()
+        .map(|line| line.to_line(help.cursor(), inner_w))
+        .collect::<Vec<_>>();
+
+    let readout = format!(
+        " {} of {rows} ",
+        if rows > 0 { help.cursor() + 1 } else { 0 }
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::Cyan))
+        .title_top(" Keybindings ")
+        .title_bottom(Line::from(readout).right_aligned());
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(selected).block(block), rect);
+
+    if lines.len() > visible {
+        // No end symbols: they would land on the corners the readout shares.
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        let mut state = ScrollbarState::new(lines.len().saturating_sub(visible)).position(offset);
+        frame.render_stateful_widget(scrollbar, rect, &mut state);
+    }
+}
+
+/// One line of the panel's body.
+///
+/// A section heading and the blank line after it carry no row, which is what lets the cursor
+/// step over bindings while the view scrolls over lines.
+struct HelpLine {
+    text: String,
+    /// Where the caption ends, so the description can be dimmed on its own.
+    caption_end: usize,
+    row: Option<usize>,
+    /// A row `⏎` will not run. Dimmed, so doing nothing reads as an answer rather than a bug.
+    dim: bool,
+}
+
+impl HelpLine {
+    fn to_line(&self, cursor: usize, width: u16) -> Line<'static> {
+        if self.row == Some(cursor) {
+            // Built from unstyled text and reversed as one span: a span carrying its own
+            // colour would end the bar in the middle of the row.
+            let mut text = self.text.clone();
+            let padding = usize::from(width).saturating_sub(text.chars().count());
+            text.push_str(&" ".repeat(padding));
+            return Line::from(Span::styled(
+                text,
+                Style::new().add_modifier(Modifier::REVERSED),
+            ));
+        }
+        if self.row.is_none() {
+            let color = if self.dim {
+                Color::DarkGray
+            } else {
+                Color::Cyan
+            };
+            return Line::from(Span::styled(self.text.clone(), Style::new().fg(color)));
+        }
+
+        let muted = Style::new().fg(Color::DarkGray);
+        let caption = self.text[..self.caption_end].to_owned();
+        let desc = self.text[self.caption_end..].to_owned();
+        Line::from(vec![
+            Span::styled(caption, if self.dim { muted } else { Style::new() }),
+            Span::styled(desc, muted),
+        ])
+    }
+}
+
+/// The caption column's width, and the width of the widest line the body will produce.
+fn help_metrics(sections: &[HelpSection]) -> (u16, u16) {
+    let caption_w = sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .map(|row| width_of(row.caption))
+        .max()
+        .unwrap_or(0);
+    let desc_w = sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .map(|row| width_of(row.desc))
+        .max()
+        .unwrap_or(0);
+    let title_w = sections
+        .iter()
+        .map(|section| width_of(section.title))
+        .max()
+        .unwrap_or(0);
+
+    let column = HELP_GUTTER
+        .saturating_add(caption_w)
+        .saturating_add(HELP_KEY_GAP);
+    // A heading is `── Title ` at the description column, so a long title can be the widest
+    // thing in the box.
+    let content_w = column
+        .saturating_add(desc_w)
+        .max(column.saturating_add(title_w).saturating_add(4));
+    (caption_w, content_w)
+}
+
+/// The panel's box, centered on `area`.
+///
+/// Total for every `u16`: the panel is the one thing on screen that is sized by arithmetic
+/// rather than by a layout, and an underflow here panics inside the draw closure.
+pub fn help_rect(content_w: u16, body_len: u16, area: Rect) -> Rect {
+    let mut rect = centered(
+        area,
+        help_width(content_w, area.width),
+        help_height(body_len, area.height),
+    );
+    // A box has to be able to hold its own border. Nothing is drawn at a size like this —
+    // the guard in `render_help` stops long before — but the arithmetic stays total on its
+    // own terms rather than by relying on that guard.
+    rect.width = rect.width.max(2);
+    rect.height = rect.height.max(2);
+    rect
+}
+
+fn help_width(content_w: u16, frame_w: u16) -> u16 {
+    // Two borders and the blank column before the right one: the box must never come out
+    // tighter than the text it holds.
+    let share = u16::try_from(u32::from(frame_w) * u32::from(HELP_PCT) / 100).unwrap_or(u16::MAX);
+    let preferred = content_w.saturating_add(2 + HELP_PAD_R).max(share);
+
+    let mut limit = frame_w.min(HELP_MAX_W);
+    // The margin is only reserved when the frame can spare it: on a narrow terminal the
+    // panel is worth more than the sliver of pane beside it.
+    if frame_w >= HELP_MIN_W + 2 * HELP_MARGIN {
+        limit = limit.min(frame_w - 2 * HELP_MARGIN);
+    }
+
+    // The ceiling wins. A `clamp` would raise the floor to meet the ceiling when the two
+    // invert, which on a twenty-column terminal hands back a thirty-wide panel.
+    preferred.max(HELP_MIN_W.min(frame_w)).min(limit).max(2)
+}
+
+fn help_height(body_len: u16, frame_h: u16) -> u16 {
+    // Two rows of frame left around it, and never fewer than one body row.
+    let ceiling = frame_h.saturating_sub(2).max(3);
+    body_len.saturating_add(2).min(ceiling).min(frame_h.max(2))
+}
+
+/// Lay the sections out: a heading per section, its rows, and a blank line between sections.
+fn help_body(sections: &[HelpSection], caption_w: u16, inner_w: u16) -> Vec<HelpLine> {
+    let column = usize::from(HELP_GUTTER + caption_w + HELP_KEY_GAP);
+    let mut lines = Vec::new();
+    let mut index = 0;
+
+    for (position, section) in sections.iter().enumerate() {
+        if position > 0 {
+            lines.push(HelpLine {
+                text: String::new(),
+                caption_end: 0,
+                row: None,
+                dim: false,
+            });
+        }
+
+        let heading = format!("{:column$}── {} ", "", section.title);
+        let rule = usize::from(inner_w).saturating_sub(heading.chars().count());
+        lines.push(HelpLine {
+            text: format!("{heading}{}", "─".repeat(rule)),
+            caption_end: 0,
+            row: None,
+            dim: false,
+        });
+
+        for row in &section.rows {
+            let caption = format!(
+                "{:gutter$}{:>caption_w$}",
+                "",
+                row.caption,
+                gutter = usize::from(HELP_GUTTER),
+                caption_w = usize::from(caption_w),
+            );
+            let caption_end = caption.len();
+            let gap = " ".repeat(usize::from(HELP_KEY_GAP));
+            lines.push(HelpLine {
+                text: format!("{caption}{gap}{}", row.desc),
+                caption_end,
+                row: Some(index),
+                dim: row.run.is_none(),
+            });
+            index += 1;
+        }
+    }
+    lines
+}
+
+/// The body when the query matches nothing.
+///
+/// One line in a box still sized for twenty — which is exactly the case the bounded slice in
+/// `render_help` exists for.
+fn no_match_line(query: &str, caption_w: u16, inner_w: u16) -> HelpLine {
+    let text = format!("no match for \"{query}\"");
+    let column = usize::from(HELP_GUTTER + caption_w + HELP_KEY_GAP);
+    // Lined up with the descriptions when the message fits there, and flush left when it does
+    // not: the box is sized for the whole list, but a narrow terminal makes that indent the
+    // difference between a legible message and one truncated to its first letter.
+    let indent = if column + text.chars().count() <= usize::from(inner_w) {
+        column
+    } else {
+        0
+    };
+
+    HelpLine {
+        text: format!("{:indent$}{text}", ""),
+        caption_end: 0,
+        row: None,
+        dim: true,
+    }
+}
+
+/// The first visible line, chosen so the cursor's row is on screen.
+///
+/// Starts from the stored offset, so a view the user scrolled deliberately survives a
+/// keystroke that did not need to move it. Scrolling up keeps walking back over the lines
+/// that carry no row, which brings a section's heading into view with its first binding.
+fn help_scroll_to(lines: &[HelpLine], cursor: usize, offset: usize, visible: usize) -> usize {
+    let Some(at) = lines.iter().position(|line| line.row == Some(cursor)) else {
+        return 0;
+    };
+
+    let mut offset = offset.min(lines.len().saturating_sub(1));
+    if at < offset {
+        offset = at;
+        while offset > 0 && lines[offset - 1].row.is_none() {
+            offset -= 1;
+        }
+    }
+    if visible > 0 && at >= offset + visible {
+        offset = at + 1 - visible;
+    }
+    offset.min(lines.len().saturating_sub(visible.max(1)))
+}
+
+fn line_count(sections: &[HelpSection]) -> u16 {
+    u16::try_from(keys::help_line_count(sections)).unwrap_or(u16::MAX)
+}
+
+fn width_of(text: &str) -> u16 {
+    u16::try_from(text.chars().count()).unwrap_or(u16::MAX)
 }
 
 fn pane_block(title: &str, focused: bool) -> Block<'static> {

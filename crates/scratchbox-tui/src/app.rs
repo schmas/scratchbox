@@ -12,7 +12,7 @@ use scratchbox_core::order::{self, OrderStore};
 use scratchbox_core::{Format, NoteId, Result, Store, StoreEvent, WorkspaceHealth, reconcile};
 
 use crate::editor::EditorPane;
-use crate::save;
+use crate::{keys, save};
 
 /// How long the buffer sits untouched before it is written.
 ///
@@ -23,6 +23,13 @@ pub const IDLE_SAVE: Duration = Duration::from_millis(300);
 
 /// How often an unavailable workspace is prodded to see whether it came back.
 const HEALTH_RECHECK: Duration = Duration::from_secs(5);
+
+/// What the terminal is assumed to be until it says otherwise.
+///
+/// `App::new` runs before there is a terminal to ask — and under `--bench-first-frame` there
+/// never is one. The same size the off-screen tests use, so a headless run behaves like the
+/// one they observe.
+const ASSUMED_SIZE: (u16, u16) = (120, 40);
 
 /// Which pane the keyboard is talking to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +51,75 @@ pub enum Conflict {
     Deleted,
 }
 
+/// The keybindings panel's state while it is open.
+///
+/// An `Option<Help>` on `App` rather than a [`Focus`] variant: `Focus` means "which pane owns
+/// the arrows", and this owns the whole keyboard — which is what the two existing prompts
+/// model as an `Option` too.
+#[derive(Default)]
+pub struct Help {
+    /// Index into the rows currently listed, not into the keymap: a filter changes what is
+    /// listed, and the cursor addresses what the user can see.
+    cursor: usize,
+    /// The first visible body line. Lines and rows are different counts — a section heading
+    /// is a line with no row — which is what lets the cursor step over bindings while the
+    /// view scrolls over lines.
+    ///
+    /// Written by the handlers. Rendering reads it and clamps its own copy, never this one.
+    offset: usize,
+    /// The filter query, and whether keys are going into it rather than moving the cursor.
+    query: String,
+    searching: bool,
+}
+
+impl Help {
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub fn searching(&self) -> bool {
+        self.searching
+    }
+
+    /// The sections the panel is currently listing.
+    ///
+    /// One walk, indexed by the cursor, the renderer, and `⏎` alike: two of them filtering
+    /// separately would disagree the moment either was edited.
+    pub fn listed(&self) -> Vec<keys::HelpSection> {
+        keys::filter(&keys::help_sections(), &self.query)
+    }
+
+    /// Pull the cursor and the first visible line back inside the list.
+    ///
+    /// Both belong to the handlers — rendering only reads them. The window height used here
+    /// is an upper bound: the frame, less its status line and the panel's two borders. The
+    /// real window is never larger, so this can only hold the offset short of the end rather
+    /// than leave it past one.
+    fn clamp(&mut self, size: (u16, u16)) {
+        let sections = self.listed();
+        let last_row = keys::help_row_count(&sections).saturating_sub(1);
+        let lines = keys::help_line_count(&sections);
+        let window = usize::from(size.1).saturating_sub(3).max(1);
+
+        self.cursor = self.cursor.min(last_row);
+        self.offset = self.offset.min(lines.saturating_sub(window));
+    }
+}
+
+/// How long the panel's filter query may get.
+///
+/// Longer than any caption or description, so it can never be the reason a search finds
+/// nothing — and short enough that the prompt cannot push its own hints off the status line.
+pub const HELP_QUERY_MAX: usize = 40;
+
 pub struct App {
     store: Box<dyn Store>,
     order: OrderStore,
@@ -63,6 +139,10 @@ pub struct App {
     save_deadline: Option<Instant>,
     /// An external change waiting on the user.
     conflict: Option<Conflict>,
+    /// The keybindings panel, while it is open.
+    help: Option<Help>,
+    /// The terminal as last reported, for the handlers that need a window height.
+    last_size: (u16, u16),
     /// Last known state of the workspace, and when to look again once it is bad.
     health: WorkspaceHealth,
     health_recheck: Option<Instant>,
@@ -84,6 +164,8 @@ impl App {
             pending_delete: None,
             save_deadline: None,
             conflict: None,
+            help: None,
+            last_size: ASSUMED_SIZE,
             health: WorkspaceHealth::Ok,
             health_recheck: None,
             quit_forced: false,
@@ -149,6 +231,133 @@ impl App {
     /// Whether the workspace is still somewhere the app can write.
     pub fn health(&self) -> WorkspaceHealth {
         self.health
+    }
+
+    // --- the keybindings panel -------------------------------------------------------
+
+    /// The panel's state, while it is open.
+    pub fn help(&self) -> Option<&Help> {
+        self.help.as_ref()
+    }
+
+    /// Whether keys are currently going into the panel's filter.
+    pub fn help_searching(&self) -> bool {
+        self.help.as_ref().is_some_and(Help::searching)
+    }
+
+    /// What `⏎` would run: the selected row's command, if it has one.
+    ///
+    /// `None` for a row that describes a prompt, for quit, and for the panel's own key — the
+    /// three cases where running the row from here would be wrong rather than merely useless.
+    /// It walks the same list the panel draws, so the row that runs is the highlighted one
+    /// even under a filter.
+    pub fn help_selection(&self) -> Option<keys::Command> {
+        let help = self.help.as_ref()?;
+        let sections = help.listed();
+        let row = sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .nth(help.cursor())?;
+        row.run
+    }
+
+    pub fn open_help(&mut self) {
+        self.help = Some(Help::default());
+    }
+
+    pub fn close_help(&mut self) {
+        self.help = None;
+    }
+
+    /// Move the panel's cursor, without wrapping.
+    ///
+    /// A list this short is easier to read when its ends hold still: a cursor that jumped
+    /// from the last binding back to the first would look like the panel lost its place.
+    pub fn help_move(&mut self, delta: isize) {
+        self.with_help(|help| help.cursor = help.cursor.saturating_add_signed(delta));
+    }
+
+    pub fn help_to(&mut self, row: usize) {
+        self.with_help(|help| help.cursor = row);
+    }
+
+    pub fn help_to_end(&mut self) {
+        self.help_to(usize::MAX);
+    }
+
+    /// Move the panel's view without moving the cursor.
+    pub fn help_scroll(&mut self, delta: isize) {
+        self.with_help(|help| help.offset = help.offset.saturating_add_signed(delta));
+    }
+
+    /// Start filtering the list.
+    pub fn help_search(&mut self) {
+        self.with_help(|help| help.searching = true);
+    }
+
+    /// Leave the filter prompt, keeping the query.
+    pub fn help_search_commit(&mut self) {
+        self.with_help(|help| help.searching = false);
+    }
+
+    /// Leave the filter prompt and clear the query.
+    ///
+    /// One `esc` gives the whole list back, a second closes the panel: a user who has typed
+    /// themselves into a corner should not have to decide which of the two they meant.
+    pub fn help_search_cancel(&mut self) {
+        self.with_help(|help| {
+            help.searching = false;
+            help.query.clear();
+            help.offset = 0;
+        });
+    }
+
+    pub fn help_type(&mut self, c: char) {
+        self.with_help(|help| {
+            if help.query.chars().count() < HELP_QUERY_MAX {
+                help.query.push(c);
+            }
+            // The view is measured in lines of a list that just changed underneath it, so
+            // keeping it would scroll to a place that no longer means anything.
+            help.offset = 0;
+        });
+    }
+
+    pub fn help_backspace(&mut self) {
+        self.with_help(|help| {
+            help.query.pop();
+            help.offset = 0;
+        });
+    }
+
+    /// Change the panel's state and put the cursor and view back inside what it now lists.
+    ///
+    /// Every mutator goes through here, because the indices go stale for the same reason each
+    /// time: the list under them got shorter — by a filter, or by the window changing.
+    fn with_help(&mut self, change: impl FnOnce(&mut Help)) {
+        let size = self.last_size;
+        if let Some(help) = self.help.as_mut() {
+            change(help);
+            help.clamp(size);
+        }
+    }
+
+    /// The terminal as last reported.
+    pub fn last_size(&self) -> (u16, u16) {
+        self.last_size
+    }
+
+    /// Record the terminal's size.
+    ///
+    /// The panel's handlers need a window height and there is nowhere else to get one: the
+    /// loop discarded every resize before this. A stale size costs at most one frame, because
+    /// rendering clamps again against the box it actually drew.
+    pub fn set_size(&mut self, width: u16, height: u16) {
+        self.last_size = (width, height);
+        let size = self.last_size;
+        if let Some(help) = self.help.as_mut() {
+            help.clamp(size);
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -384,6 +593,9 @@ impl App {
             "conflict entered"
         );
         self.conflict = Some(conflict);
+        // Two modals on screen at once means the user answers the wrong question. The panel
+        // is only ever open because somebody is reading it, so it is the one that gives way.
+        self.help = None;
         // The decisive half of the policy. Autosave that kept running from here would write
         // the buffer straight over the external change, which is the loss the conflicted
         // state exists to prevent.

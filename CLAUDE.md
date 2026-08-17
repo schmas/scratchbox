@@ -72,6 +72,8 @@ cargo run -p scratchbox-tui --example spike_editor
 - `scratchbox-core` stays headless — no ratatui/crossterm types leak into it; TUI and CLI both depend on it. It takes the `tracing` facade only: a library that installed a subscriber would decide for both binaries where diagnostics go.
 - Diagnostics are file-only and off unless `RUST_LOG` names a `scratchbox` target. Nothing in this project writes a diagnostic to stdout or stderr — the TUI owns the terminal and `scratchbox` runs from a hotkey. `eprintln!` is reserved for fatal errors and config warnings, which are user-facing messaging rather than diagnostics.
 - The trash directory lives outside the workspace on purpose (deleted notes may hold secrets; must never sync to a cloud-synced workspace).
+- The normal-mode keymap is declared once, in `keys::BINDINGS`: dispatch scans it, and the status line and the help panel read it, so a rebind moves the behaviour and the text describing it together. The two prompt keymaps (`map_confirmation`, `map_conflict`) are the exception — their rule is a catch-all rather than a set of chords, so their help rows are written out and held to the code by an agreement test in `tests/help_panel.rs`.
+- Key routing lives in `input::handle_key`, not beside the event loop, so which modal owns the keyboard can be driven from a test without a terminal.
 - Filesystem-watcher tests are inherently racy across inotify/FSEvents; CI runs the watcher suite and the live-watcher save test 20x per OS rather than once.
 
 ## Rules
