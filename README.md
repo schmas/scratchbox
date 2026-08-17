@@ -113,3 +113,6 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+What the project depends on, and what it turns down on purpose, is recorded in
+[docs/dependencies.md](docs/dependencies.md).
