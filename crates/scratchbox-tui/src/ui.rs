@@ -2,7 +2,7 @@
 
 use edtui::{EditorTheme, EditorView};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -142,7 +142,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
         (None, WorkspaceHealth::Ok) => (
             match (app.status(), app.help()) {
                 (Some(status), _) => status.to_owned(),
-                (None, Some(help)) if help.searching() => filter_prompt(help.query()),
+                (None, Some(help)) if help.searching() => filter_prompt(),
                 (None, Some(_)) => help_hints(),
                 (None, None) => status_hints(),
             },
@@ -164,10 +164,13 @@ fn help_hints() -> String {
 
 /// The status line while the filter prompt is up.
 ///
+/// The query itself is drawn on the panel's bottom border, not here: this line can be holding
+/// a message about the note, and the text a user is typing must not depend on that being empty.
+///
 /// No quit hint: inside the prompt `q` is a character. The ways out are the two named here,
 /// plus `^Q`, which stays live everywhere.
-fn filter_prompt(query: &str) -> String {
-    format!("Filter: {query}▊   ⏎ done   esc clear")
+fn filter_prompt() -> String {
+    "⏎ done   esc clear".to_owned()
 }
 
 /// One status-line hint: a command, or two commands that share a label.
@@ -355,22 +358,30 @@ fn render_help(frame: &mut Frame, help: &Help, sections: &[HelpSection], area: R
         " {} of {rows} ",
         if rows > 0 { help.cursor() + 1 } else { 0 }
     );
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(Color::Cyan))
         .title_top(" Keybindings ")
         .title_bottom(Line::from(readout).right_aligned());
 
+    // On the panel's own border rather than in the status line, because the status line
+    // belongs to messages about the note — and one of those left over from earlier in the
+    // session would otherwise hide the only echo of what the user is typing.
+    if help.searching() {
+        block = block.title_bottom(Line::from(format!(" Filter: {}▊ ", help.query())));
+    }
+
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(selected).block(block), rect);
 
     if lines.len() > visible {
-        // No end symbols: they would land on the corners the readout shares.
+        // Inset by one row, so the track runs beside the body and leaves the corners to the
+        // border — the bottom one carries the readout.
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None);
         let mut state = ScrollbarState::new(lines.len().saturating_sub(visible)).position(offset);
-        frame.render_stateful_widget(scrollbar, rect, &mut state);
+        frame.render_stateful_widget(scrollbar, rect.inner(Margin::new(0, 1)), &mut state);
     }
 }
 

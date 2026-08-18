@@ -54,9 +54,11 @@ written out beside it, so it cannot fall behind the keys it describes — which 
 table of them here. The two prompts' keys are the exception, and a test keeps those honest.
 
 The editor pane is [edtui](https://github.com/preiter93/edtui) in **emacs mode**, and it is
-**modeless**: there is no normal/insert distinction to leave. `^N`, `^D`, and `^H` are taken by
-scratchbox and do not reach the editor; everything else does. Nothing is lost to `^H` — it
-would have been edtui's delete-character-backward, which is what `Backspace` already does.
+**modeless**: there is no normal/insert distinction to leave. `^N`, `^D`, `^H`, and `tab` are
+taken by scratchbox and do not reach the editor; everything else does. Nothing is lost to `^H` —
+it would have been edtui's delete-character-backward, which is what `Backspace` already does —
+but `tab` does cost you something: it switches pane, so a literal tab character cannot be typed
+into a note.
 
 ## Paths
 

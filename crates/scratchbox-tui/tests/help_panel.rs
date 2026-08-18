@@ -18,7 +18,7 @@ use scratchbox_core::order::OrderStore;
 use scratchbox_core::{APP_SUBDIR, FolderSync, NoteId, StoreEvent, WorkspaceHealth};
 use scratchbox_tui::app::{App, Focus, IDLE_SAVE};
 use scratchbox_tui::editor::EditorPane;
-use scratchbox_tui::keys::{self, Action, BINDINGS, Command, HelpRow, HelpSection};
+use scratchbox_tui::keys::{self, Action, BINDINGS, Command, HelpKey, HelpRow, HelpSection};
 use scratchbox_tui::{input, ui};
 use tempfile::TempDir;
 
@@ -102,13 +102,17 @@ fn screen(app: &mut App, width: u16, height: u16) -> String {
     text_rows(&draw(app, width, height)).join("\n")
 }
 
-/// The panel's box, found by the title on its top border.
 fn panel_box(buffer: &Buffer) -> Rect {
+    titled_box(buffer, "Keybindings")
+}
+
+/// A bordered box on screen, found by the title on its top border.
+fn titled_box(buffer: &Buffer, title: &str) -> Rect {
     let rows = text_rows(buffer);
     let y = rows
         .iter()
-        .position(|row| row.contains("Keybindings"))
-        .expect("the panel is not on screen");
+        .position(|row| row.contains(title))
+        .unwrap_or_else(|| panic!("{title} is not on screen"));
     let title: Vec<char> = rows[y].chars().collect();
     let x = title.iter().position(|c| *c == '┌').unwrap();
     let right = title.iter().rposition(|c| *c == '┐').unwrap();
@@ -124,6 +128,18 @@ fn panel_box(buffer: &Buffer) -> Rect {
         (right - x + 1) as u16,
         (bottom + 1) as u16,
     )
+}
+
+/// Only what is inside a box, so a match cannot come from the frame around it.
+fn box_text(buffer: &Buffer, rect: Rect) -> String {
+    (rect.top()..rect.bottom())
+        .map(|y| {
+            (rect.left()..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn rows(sections: &[HelpSection]) -> Vec<&HelpRow> {
@@ -250,10 +266,16 @@ fn a_quit_refused_by_a_failed_save_leaves_the_message_where_it_can_be_seen() {
     assert!(f.app.status().is_some(), "the user was not told");
 }
 
-/// I8's other half: a workspace that cannot be written at all writes nothing and says so in
-/// the banner, and quitting from the panel still lets that banner be seen.
+/// A workspace that vanished writes nothing and lets the quit through — and the panel is out
+/// of the way when it does, so nothing the app has to say is behind it.
+///
+/// It says nothing here, though. Quitting sets `should_quit`, the loop returns before the next
+/// draw, and the health only turns bad inside that same quit — so the banner this degraded
+/// state exists to show is never drawn on the way out. That is older than the panel and is not
+/// changed by it; the assertion below is written to what actually happens rather than to what
+/// the panel would like to claim.
 #[test]
-fn a_quit_under_a_degraded_workspace_leaves_the_banner_visible() {
+fn a_quit_under_a_degraded_workspace_is_not_blocked_by_the_panel() {
     let mut f = fixture(&[("a.md", "original")]);
     type_text(&mut f.app, "mine ");
     fs::remove_dir_all(&f.workspace).unwrap();
@@ -262,8 +284,24 @@ fn a_quit_under_a_degraded_workspace_leaves_the_banner_visible() {
     press(&mut f.app, ctrl('q'));
 
     assert_eq!(f.app.health(), WorkspaceHealth::Missing);
-    assert!(f.app.help().is_none());
+    assert!(f.app.help().is_none(), "the panel outlived the quit");
     assert!(f.app.should_quit());
+
+    // The banner is what a *later* frame would show, and there is no later frame on this path.
+    // Where there is one — the workspace goes missing while the app keeps running — the panel
+    // does not cover it.
+    let mut g = fixture(&[("a.md", "original")]);
+    type_text(&mut g.app, "mine ");
+    fs::remove_dir_all(&g.workspace).unwrap();
+    g.app.save_now().ok();
+    press(&mut g.app, ctrl('h'));
+
+    let rows = rendered(&mut g.app);
+    assert!(
+        rows.last().unwrap().contains("workspace unavailable"),
+        "the panel hid the banner: {:?}",
+        rows.last().unwrap()
+    );
 }
 
 #[test]
@@ -406,10 +444,12 @@ fn only_the_literal_rows_and_the_two_exceptions_cannot_be_run() {
             "^Q",
             "esc",
             "↑/↓",
+            "home/end",
             "⏎",
             "/",
             "",
-            "^N ^D ^H",
+            "^N ^D ^H tab",
+            "",
         ]
     );
 }
@@ -490,7 +530,9 @@ fn the_literal_rows_state_what_the_code_does_and_what_the_prompts_print() {
 /// Every row of `title` names a key and a verb the prompt itself also prints.
 ///
 /// Derived from the rows rather than restated, so editing a row without editing the prompt —
-/// or the other way round — is what fails here.
+/// or the other way round — is what fails here. `on_screen` is the text *inside the prompt's
+/// own box*: searched against the whole frame, a one-character key like `k` or `y` matches a
+/// note name or the word "trash" and the check proves nothing.
 fn assert_prompt_agrees(sections: &[HelpSection], title: &str, on_screen: &str) {
     for row in &section(sections, title).rows {
         let key = row.caption.split('/').next().unwrap();
@@ -510,12 +552,14 @@ fn assert_prompt_agrees(sections: &[HelpSection], title: &str, on_screen: &str) 
 fn delete_prompt_on_screen() -> String {
     let mut f = fixture(&[("a.md", "text")]);
     f.app.request_delete();
-    rendered(&mut f.app).join("\n")
+    let buffer = draw(&mut f.app, 120, 40);
+    box_text(&buffer, titled_box(&buffer, "Confirm"))
 }
 
 fn conflict_prompt_on_screen() -> String {
     let mut f = raised_conflict();
-    rendered(&mut f.app).join("\n")
+    let buffer = draw(&mut f.app, 120, 40);
+    box_text(&buffer, titled_box(&buffer, "External change"))
 }
 
 // --- drawing it ---------------------------------------------------------------------------
@@ -774,8 +818,10 @@ fn slash_opens_the_filter_prompt() {
     let rows = rendered(&mut f.app);
     let status = rows.last().unwrap();
 
-    assert!(status.starts_with("Filter:"), "status line: {status:?}");
+    assert!(status.starts_with("⏎ done"), "status line: {status:?}");
     assert!(!status.contains("esc close"), "the hints are still there");
+    // The query's own echo is on the panel, where a message cannot cover it.
+    assert!(rows.join("\n").contains("Filter:"));
 }
 
 #[test]
@@ -1127,21 +1173,28 @@ fn enter_while_searching_commits_the_filter_and_runs_nothing() {
 /// and the one that runs has to be the one highlighted.
 #[test]
 fn enter_under_a_filter_runs_the_row_the_cursor_is_on() {
-    let mut f = fixture(&[("a.md", "text")]);
-    let before = f.app.focus();
-    search(&mut f.app, "tab");
+    let mut f = fixture(&[("a.md", "first"), ("b.md", "second")]);
+    f.app.select_next().unwrap();
+    assert_eq!(f.app.selected().unwrap().as_str(), "b.md");
+
+    // A query that leaves one row, and not the row that index zero holds unfiltered.
+    search(&mut f.app, "previous");
     press(&mut f.app, plain(KeyCode::Enter));
 
     assert_eq!(
         listed(&f.app),
-        vec!["tab"],
+        vec!["↑"],
         "the query matched something else"
     );
     assert_eq!(f.app.help().unwrap().cursor(), 0);
     press(&mut f.app, plain(KeyCode::Enter));
 
-    assert_ne!(f.app.focus(), before, "row zero ran the unfiltered binding");
-    assert_eq!(f.app.notes().len(), 1, "it created a note instead");
+    assert_eq!(
+        f.app.selected().unwrap().as_str(),
+        "a.md",
+        "row zero ran the unfiltered binding"
+    );
+    assert_eq!(f.app.notes().len(), 2, "it created a note instead");
 }
 
 /// A row `⏎` will not run is dimmed, so that doing nothing reads as an answer.
@@ -1149,8 +1202,9 @@ fn enter_under_a_filter_runs_the_row_the_cursor_is_on() {
 fn the_rows_that_cannot_be_run_are_drawn_dimmed() {
     let mut f = fixture(&[("a.md", "text")]);
     press(&mut f.app, ctrl('h'));
-    // Off every row under test: the cursor's own row is reversed rather than coloured.
-    press(&mut f.app, plain(KeyCode::End));
+    // Off every row under test — the cursor's own row is reversed rather than coloured — and
+    // near the top, so nothing under test is scrolled out of the window.
+    f.app.help_to(2);
 
     let buffer = draw(&mut f.app, 120, 40);
     let panel = panel_box(&buffer);
@@ -1175,6 +1229,76 @@ fn the_rows_that_cannot_be_run_are_drawn_dimmed() {
     }
 }
 
+/// The panel's own keys are the one keymap with nothing generated from it: `map_help` decides
+/// them, the `This panel` section describes them, and the status line advertises a subset. This
+/// is what keeps those three from drifting.
+#[test]
+fn the_panels_own_keys_do_what_the_panel_says_they_do() {
+    let sections = keys::help_sections();
+    let panel = section(&sections, "This panel");
+    let captions: Vec<&str> = panel.rows.iter().map(|row| row.caption).collect();
+
+    // Every key the section names is one `map_help` actually answers, in the order listed.
+    let expected = [
+        (KeyCode::Esc, HelpKey::Close),
+        (KeyCode::Up, HelpKey::Up),
+        (KeyCode::Home, HelpKey::Top),
+        (KeyCode::Enter, HelpKey::Run),
+        (KeyCode::Char('/'), HelpKey::Search),
+    ];
+    assert_eq!(captions.len(), expected.len(), "{captions:?}");
+    for (code, outcome) in expected {
+        assert_eq!(keys::map_help(plain(code), false), outcome);
+    }
+
+    // The alternatives the rows mention are real too.
+    for (code, outcome) in [
+        (KeyCode::Char('k'), HelpKey::Up),
+        (KeyCode::Char('j'), HelpKey::Down),
+        (KeyCode::End, HelpKey::Bottom),
+        (KeyCode::Down, HelpKey::Down),
+    ] {
+        assert_eq!(keys::map_help(plain(code), false), outcome);
+    }
+
+    // And the status line advertises only keys the section lists.
+    let mut f = fixture(&[("a.md", "text")]);
+    press(&mut f.app, ctrl('h'));
+    let rows = rendered(&mut f.app);
+    let status = rows.last().unwrap();
+    for advertised in ["esc", "↑/↓", "⏎", "/"] {
+        assert!(
+            captions.iter().any(|caption| caption.contains(advertised)),
+            "the status line offers {advertised}, which the panel does not list"
+        );
+        assert!(status.contains(advertised));
+    }
+}
+
+/// The filter's echo lives on the panel's border, not in the status line: a message about the
+/// note gets there first and never goes away, and a user typing into an invisible prompt has
+/// no way to tell what they are searching for.
+#[test]
+fn the_typed_query_is_visible_even_behind_a_status_message() {
+    let mut f = fixture(&[("a.md", "text"), ("b.md", "other")]);
+    press(&mut f.app, ctrl('d'));
+    press(&mut f.app, plain(KeyCode::Char('y')));
+    assert!(f.app.status().is_some(), "no message to be hidden behind");
+
+    search(&mut f.app, "delete");
+
+    let rows = rendered(&mut f.app);
+    let screen = rows.join("\n");
+    assert!(
+        rows.last().unwrap().contains("moved to the trash"),
+        "the message was dropped instead"
+    );
+    assert!(
+        screen.contains("Filter: delete"),
+        "the query is nowhere on screen"
+    );
+}
+
 /// An app with an unresolved external change on the open note.
 fn raised_conflict() -> Fixture {
     let mut f = fixture(&[("a.md", "original")]);
@@ -1186,4 +1310,3 @@ fn raised_conflict() -> Fixture {
     assert!(f.app.conflict().is_some());
     f
 }
-

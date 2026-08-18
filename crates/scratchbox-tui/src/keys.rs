@@ -465,7 +465,8 @@ fn literal_sections() -> Vec<HelpSection> {
             title: "This panel",
             rows: vec![
                 row("esc", "close this panel"),
-                row("↑/↓", "select a binding"),
+                row("↑/↓", "select a binding — k and j do the same"),
+                row("home/end", "jump to the first or last binding"),
                 row("⏎", "run the selected binding"),
                 row("/", "search this list"),
             ],
@@ -478,8 +479,12 @@ fn literal_sections() -> Vec<HelpSection> {
                     "the editor is emacs-style and modeless — there is no mode to leave",
                 ),
                 row(
-                    "^N ^D ^H",
+                    "^N ^D ^H tab",
                     "taken by scratchbox: edtui's own meanings do not apply to them",
+                ),
+                row(
+                    "",
+                    "tab switches pane, so a literal tab character cannot be typed here",
                 ),
             ],
         },
